@@ -4,6 +4,7 @@ use ratatui::widgets::ListState;
 
 use crate::{
     diff::DiffView,
+    editor::EditRequest,
     git::{FileEntry, Mode, Repository},
     highlight::SyntaxHighlighter,
 };
@@ -90,6 +91,7 @@ pub struct App {
     pub viewport_width: usize,
     pub show_help: bool,
     pub error: Option<String>,
+    pub edit_request: Option<EditRequest>,
     highlighter: SyntaxHighlighter,
 }
 
@@ -117,6 +119,7 @@ impl App {
             viewport_width: 80,
             show_help: false,
             error: None,
+            edit_request: None,
             highlighter: SyntaxHighlighter::default(),
         };
         app.list_state.select((!app.files.is_empty()).then_some(0));
@@ -222,6 +225,42 @@ impl App {
         );
     }
 
+    fn request_edit(&mut self) {
+        let Some(entry) = self.selected() else {
+            return;
+        };
+        let hunk = if self.focus == Focus::Diff {
+            // The top row belongs to this hunk even when its header is scrolled offscreen.
+            self.view
+                .hunks
+                .iter()
+                .rposition(|&row| row <= self.scroll)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let line = self
+            .view
+            .hunks
+            .get(hunk)
+            .and_then(|&start| {
+                let end = self
+                    .view
+                    .hunks
+                    .get(hunk + 1)
+                    .copied()
+                    .unwrap_or(self.view.rows.len());
+                self.view.rows[start..end]
+                    .iter()
+                    .find_map(|row| row.new_line)
+            })
+            .unwrap_or(1);
+        self.edit_request = Some(EditRequest {
+            path: entry.path.clone(),
+            line: Some(line),
+        });
+    }
+
     fn move_file(&mut self, delta: isize) {
         if self.files.is_empty() {
             return;
@@ -270,7 +309,7 @@ impl App {
         }
     }
 
-    /// Returns true when the user requests exit. Never writes to the repository.
+    /// Returns true when the user requests exit; editor requests are handled by the event loop.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return true;
@@ -317,6 +356,7 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => return true,
+            KeyCode::Char('e') => self.request_edit(),
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = if self.focus == Focus::Files {
@@ -510,6 +550,140 @@ mod tests {
         app.refresh();
         assert!(app.files.is_empty());
         assert!(app.selected().is_none());
+    }
+
+    fn app_with_hunks() -> (tempfile::TempDir, App) {
+        let (dir, repo) = repo();
+        let old: String = (1..=90).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(dir.path().join("a file.txt"), &old).unwrap();
+        git(dir.path(), &["add", "."]);
+        let mut new = old;
+        for line in [10, 50, 80] {
+            new = new.replace(&format!("line {line}\n"), &format!("changed {line}\n"));
+        }
+        std::fs::write(dir.path().join("a file.txt"), new).unwrap();
+        (dir, App::new(repo, None).unwrap())
+    }
+
+    #[test]
+    fn edit_requests_use_the_first_visible_hunk_including_partial_hunks() {
+        let (_dir, mut app) = app_with_hunks();
+        app.focus = Focus::Diff;
+        app.viewport_height = 4;
+        let second = app.view.hunks[1];
+        let third = app.view.hunks[2];
+        for (scroll, line) in [
+            (0, 7),
+            (1, 7),
+            (second - 1, 7),
+            (second, 47),
+            (second + 2, 47),
+            (third - 1, 47),
+            (third, 77),
+        ] {
+            app.scroll = scroll;
+            app.clamp_scroll();
+            assert_eq!(app.scroll, scroll);
+            app.handle_key(key('e'));
+            assert_eq!(
+                app.edit_request.take(),
+                Some(EditRequest {
+                    path: PathBuf::from("a file.txt"),
+                    line: Some(line),
+                })
+            );
+            assert_eq!(app.scroll, scroll);
+        }
+        // Several hunks fit in the pane, but the top one still wins.
+        app.viewport_height = app.view.rows.len();
+        app.scroll = 0;
+        app.handle_key(key('e'));
+        assert_eq!(app.edit_request.take().unwrap().line, Some(7));
+    }
+
+    #[test]
+    fn files_pane_opens_the_first_hunk_regardless_of_diff_scroll() {
+        let (_dir, mut app) = app_with_hunks();
+        app.focus = Focus::Diff;
+        app.viewport_height = 4;
+        app.handle_key(key(']'));
+        assert_eq!(app.scroll, app.view.hunks[1]);
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(key('e'));
+        assert_eq!(
+            app.edit_request.take(),
+            Some(EditRequest {
+                path: PathBuf::from("a file.txt"),
+                line: Some(7),
+            })
+        );
+        assert_eq!(app.scroll, app.view.hunks[1]);
+    }
+
+    #[test]
+    fn diff_scrolls_pages_hunks_and_stays_in_bounds_after_refresh() {
+        let (dir, mut app) = app_with_hunks();
+        app.focus = Focus::Diff;
+        app.viewport_height = 4;
+        app.handle_key(key(']'));
+        assert_eq!(app.scroll, app.view.hunks[1]);
+        app.handle_key(key('j'));
+        app.handle_key(key('e'));
+        assert_eq!(app.edit_request.take().unwrap().line, Some(47));
+        app.handle_key(key('['));
+        assert_eq!(app.scroll, app.view.hunks[1]);
+        app.handle_key(key('['));
+        assert_eq!(app.scroll, 0);
+        app.handle_key(key('d'));
+        assert_eq!(app.scroll, 2);
+        app.handle_key(key('G'));
+        assert_eq!(app.scroll, app.view.rows.len() - app.viewport_height);
+        app.handle_key(key('g'));
+        assert_eq!(app.scroll, 0);
+        app.handle_key(key('G'));
+        std::fs::write(dir.path().join("a file.txt"), "short\n").unwrap();
+        app.refresh();
+        assert!(app.scroll <= app.view.rows.len().saturating_sub(app.viewport_height));
+    }
+
+    #[test]
+    fn missing_hunks_or_new_line_numbers_open_at_line_one() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("test.txt"), "gone").unwrap();
+        git(dir.path(), &["add", "."]);
+        std::fs::write(dir.path().join("test.txt"), "").unwrap();
+        let mut app = App::new(repo, None).unwrap();
+        assert!(!app.view.hunks.is_empty());
+        assert!(app.view.rows.iter().all(|row| row.new_line.is_none()));
+        for focus in [Focus::Files, Focus::Diff] {
+            app.focus = focus;
+            app.handle_key(key('e'));
+            assert_eq!(app.edit_request.take().unwrap().line, Some(1));
+        }
+        app.view = DiffView::notice("Binary file");
+        for focus in [Focus::Files, Focus::Diff] {
+            app.focus = focus;
+            app.handle_key(key('e'));
+            assert_eq!(app.edit_request.take().unwrap().line, Some(1));
+        }
+    }
+
+    #[test]
+    fn edit_shortcut_respects_help_branch_input_and_empty_file_lists() {
+        let (dir, repo) = repo();
+        let mut app = App::new(repo, None).unwrap();
+        app.handle_key(key('e'));
+        assert!(app.edit_request.is_none());
+        std::fs::write(dir.path().join("test.txt"), "test\n").unwrap();
+        app.refresh();
+        app.handle_key(key('?'));
+        app.handle_key(key('e'));
+        assert!(!app.show_help);
+        assert!(app.edit_request.is_none());
+        app.handle_key(key('b'));
+        app.handle_key(key('e'));
+        assert_eq!(app.branch_picker.as_ref().unwrap().input, "e");
+        assert!(app.edit_request.is_none());
     }
 
     #[test]

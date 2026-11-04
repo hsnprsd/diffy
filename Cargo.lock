@@ -141,6 +141,7 @@ dependencies = [
  "crossterm",
  "notify",
  "ratatui",
+ "shlex",
  "similar",
  "tempfile",
  "tree-sitter-bash",

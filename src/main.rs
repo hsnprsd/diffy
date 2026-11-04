@@ -1,5 +1,6 @@
 mod app;
 mod diff;
+mod editor;
 mod git;
 mod highlight;
 mod ui;
@@ -13,7 +14,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::{
+    event::{self, Event, KeyEventKind},
+    execute,
+    terminal::{EnterAlternateScreen, enable_raw_mode},
+};
 
 use crate::{app::App, git::Repository, watch::Watcher};
 
@@ -31,8 +36,8 @@ fn main() -> Result<()> {
                  --base, -b REF Compare merge-base(REF, HEAD) to HEAD (committed only)\n\n\
                  Updates automatically when repository files or refs change.\n\
                  Keys: ←/→/Tab focus · ↑/↓/j/k move · s cycle views\n\
-                       b select base branch · [/] hunks · ? help · q quit\n\n\
-                 Read-only: never stages, discards, or changes your files."
+                       e edit in $EDITOR · b select base branch · [/] hunks · ? help · q quit\n\n\
+                 Never stages or discards changes. Editing opens the working-tree file."
             );
             return Ok(());
         } else if !positional && (arg == "--version" || arg == "-V") {
@@ -93,12 +98,49 @@ fn main() -> Result<()> {
                     if app.handle_key(key) {
                         break;
                     }
+                    if let Some(request) = app.edit_request.take() {
+                        edit_file(request, &mut app, &mut terminal)?;
+                    }
                     dirty = true;
                 }
                 Event::Resize(_, _) => dirty = true,
                 _ => {}
             }
         }
+    }
+    Ok(())
+}
+
+fn edit_file(
+    request: editor::EditRequest,
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+) -> Result<()> {
+    let mut command = match request.command(&app.repo.root) {
+        Ok(command) => command,
+        Err(error) => {
+            app.error = Some(format!("Editor: {error:#}"));
+            return Ok(());
+        }
+    };
+    ratatui::try_restore().context("Could not suspend terminal")?;
+    let result = command
+        .status()
+        .context("Could not start $EDITOR")
+        .and_then(|status| {
+            if !status.success() {
+                bail!("$EDITOR exited with {status}");
+            }
+            Ok(())
+        });
+    // Resume even when launching the editor failed. Reuse the terminal and invalidate
+    // its buffers so editor output and any resize are replaced by a complete redraw.
+    enable_raw_mode().context("Could not resume terminal")?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    app.refresh();
+    if let Err(error) = result {
+        app.error = Some(format!("Editor: {error:#}"));
     }
     Ok(())
 }

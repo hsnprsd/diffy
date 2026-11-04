@@ -1,6 +1,6 @@
 # diffy
 
-A read-only, live Git diff viewer for the terminal, built with Rust, Ratatui,
+A live Git diff viewer for the terminal, built with Rust, Ratatui,
 Tree-sitter, and native filesystem notifications.
 
 - **Syntax-aware unified diffs:** both revisions are parsed in full by Tree-sitter,
@@ -17,9 +17,13 @@ Tree-sitter, and native filesystem notifications.
   merge-request-style diff against another branch. Supports local/remote-tracking
   refs, detached HEADs, and linked worktrees; uncommitted views also work on unborn
   branches.
-- **Safe to browse:** no staging, discarding, editing, or index refresh writes.
-  External diff/textconv tools are disabled. Terminal controls in source and paths
-  are escaped, and symlinks are previewed without following their targets.
+- **Open in your editor:** press `e` in either pane to open the working-tree file
+  in `$EDITOR`, then return to diffy when the editor exits. Opens at the first
+  visible hunk in the Diff pane, or the file's first hunk in the Files pane.
+- **Safe to browse:** no staging, discarding, or index refresh writes. Files are
+  only edited through your explicitly launched editor. External diff/textconv
+  tools are disabled. Terminal controls in source and paths are escaped, and
+  symlinks are previewed without following their targets.
 
 ## Install
 
@@ -97,6 +101,7 @@ branches or fetches updates. Fetch them yourself when needed.
 | `Tab` / `Shift+Tab` | Switch focus between files and diff |
 | `Enter` | Focus the diff |
 | `j` / `k`, `↓` / `↑` | Select files in the Files pane; scroll in the Diff pane |
+| `e` | Open in `$EDITOR` at the first visible hunk (Diff pane) or first file hunk (Files pane) |
 | `h` / `l` | Scroll code horizontally |
 | `PageUp` / `PageDown`, `u` / `d` | Page up / down |
 | `Home` / `End`, `g` / `G` | First / last row or file |
@@ -107,6 +112,29 @@ branches or fetches updates. Fetch them yourself when needed.
 | `q` / `Ctrl+C` | Quit |
 
 Below 80 columns, only the focused pane is shown; `←` / `→` or `Tab` switches panes.
+
+### Open a file in your editor
+
+Set `EDITOR` to an editor command, for example `export EDITOR=nvim` or
+`export EDITOR='code --wait'`. Arguments and quoted executable paths are supported;
+shell expansions and pipelines are not evaluated. An unset or invalid `EDITOR`
+shows an error without leaving diffy.
+
+Press **`e`** in the Files pane to open the selected file at its first hunk.
+In the Diff pane, **`e`** opens at the first visible hunk, including a partially
+visible hunk whose header has scrolled offscreen. The editor opens at the hunk's
+first new-file line (including context), not the first visible row. Scrolling
+with `j`/`k` or `↑`/`↓` does not add a cursor. Notices without hunks or hunks
+without new-file line numbers open at line 1.
+
+Diffy waits for the editor to exit, restores the interface, and refreshes the diff.
+Vim/Neovim, nano, Emacs, and other `+LINE` editors are supported, along with Helix,
+VS Code/VSCodium, Sublime Text, and Zed. The latter GUI editors receive `--wait`
+automatically; configure any other GUI editor to stay in the foreground.
+
+Editing always opens the **file on disk**, including from Staged and Branch views;
+line numbers may differ if disk contents have changed since that revision. Missing
+files (including deleted files) and directories cannot be opened.
 
 ## Highlighting
 
@@ -146,8 +174,9 @@ cargo test --all-targets
 
 Tests use isolated temporary Git repositories and cover staged/unstaged changes,
 conflicts, binary/large files, unusual paths, submodules, linked worktrees, all
-bundled highlighting queries, diff hunks, keyboard navigation, small terminal
-layouts, filesystem/index/ref notifications, and CLI errors. Branch tests cover
+bundled highlighting queries, diff hunks, keyboard navigation, editor commands
+and visible-hunk line mapping, small terminal layouts, filesystem/index/ref
+notifications, and CLI errors. Branch tests cover
 merge-base semantics, exclusion of uncommitted changes, immutable snapshots,
 remote-tracking refs, missing/unrelated history, comparison-mode navigation, and
 branch selection/filtering.

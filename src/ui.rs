@@ -107,7 +107,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Line::styled(format!(" {}", safe_text(error)), Style::default().fg(RED))
     } else {
         Line::styled(
-            " ←/→/Tab focus · ↑/↓/j/k move · [/] hunks · b branch · ? help · q quit",
+            " ←/→/Tab focus · ↑/↓/j/k move · e edit · [/] hunks · b branch · ? help · q quit",
             Style::default().fg(MUTED),
         )
     };
@@ -373,13 +373,14 @@ fn help(frame: &mut Frame, area: Rect) {
     );
     let text = vec![
         Line::styled(
-            "Read-only Git diffs with Tree-sitter highlighting",
+            "Live Git diffs with Tree-sitter highlighting",
             Style::default().fg(ACCENT).bold(),
         ),
         Line::raw(""),
         Line::raw("←/→ or Tab          Switch files / diff focus"),
         Line::raw("j/k or ↑/↓          Select files / scroll diff"),
         Line::raw("Enter               Focus the diff"),
+        Line::raw("e                   Edit in $EDITOR at first (visible) hunk"),
         Line::raw("h/l                 Scroll code horizontally"),
         Line::raw("PgUp/PgDn or u/d    Page up / down"),
         Line::raw("Home/End or g/G     First / last row or file"),
@@ -454,6 +455,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = screen(&terminal);
         assert!(text.contains("Select files / scroll diff"));
+        assert!(text.contains("Edit in $EDITOR at first (visible) hunk"));
         assert!(!text.contains("Filter file paths"));
         assert!(!text.contains("Refresh manually"));
         assert!(!text.contains("Next / previous file"));
@@ -525,6 +527,27 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             assert!(screen(&terminal).contains("▸ feature"));
+        }
+    }
+
+    #[test]
+    fn diff_scrolling_keeps_editor_at_the_hunk_start_after_resize() {
+        let (dir, repo) = repo();
+        let content: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(dir.path().join("test.txt"), content).unwrap();
+        let mut app = App::new(repo, None).unwrap();
+        app.focus = Focus::Diff;
+        for _ in 0..15 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        for (width, height) in [(120, 30), (40, 12), (80, 24)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            assert_eq!(terminal.get_cursor_position().unwrap(), cursor);
+            assert!(app.scroll > 0);
+            app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+            assert_eq!(app.edit_request.take().unwrap().line, Some(1));
         }
     }
 
