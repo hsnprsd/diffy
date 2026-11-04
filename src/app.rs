@@ -158,9 +158,7 @@ impl App {
             self.update(mode, false)
         })();
         if let Err(error) = result {
-            self.error = Some(format!(
-                "Refresh: {error:#}; showing last snapshot; r retries"
-            ));
+            self.error = Some(format!("Refresh: {error:#}; showing last snapshot"));
         }
     }
 
@@ -248,7 +246,7 @@ impl App {
         {
             Ok(view) => self.view = view,
             Err(error) => {
-                self.view = DiffView::notice("Could not load this file — press r to retry");
+                self.view = DiffView::notice("Could not load this file");
                 self.error = Some(format!("{}: {error:#}", entry.path.display()));
             }
         }
@@ -408,7 +406,6 @@ impl App {
             }
             KeyCode::Char(']') => self.hunk(true),
             KeyCode::Char('[') => self.hunk(false),
-            KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('s') => {
                 if let Err(error) = self.cycle_mode() {
                     self.error = Some(format!("Compare: {error:#}"));
@@ -529,6 +526,29 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
+    }
+
+    #[test]
+    fn removed_shortcuts_do_not_navigate_or_refresh() {
+        let (dir, repo) = repo();
+        for path in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.path().join(path), "line\n").unwrap();
+        }
+        let mut app = App::new(repo, None).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        std::fs::write(dir.path().join("d.txt"), "new file\n").unwrap();
+        for code in [KeyCode::Left, KeyCode::Right] {
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+            for ch in ['n', 'p', 'r'] {
+                assert!(!app.handle_key(key(ch)));
+                assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
+                assert_eq!(app.files.len(), 3);
+            }
+        }
+        app.refresh();
+        assert_eq!(app.files.len(), 4);
+        assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
+        assert!(app.handle_key(key('q')));
     }
 
     #[test]
@@ -802,7 +822,7 @@ mod tests {
     fn empty_repository_and_help_are_safe() {
         let (_dir, repo) = repo();
         let mut app = App::new(repo, None).unwrap();
-        for ch in ['j', 'k', 'G', 'g', '[', ']', 'l', 'h', 's', 'r'] {
+        for ch in ['j', 'k', 'G', 'g', '[', ']', 'l', 'h', 's'] {
             assert!(!app.handle_key(key(ch)));
         }
         assert!(app.selected().is_none());

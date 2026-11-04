@@ -42,7 +42,6 @@ runtime language-server setup are needed. The terminal controls the font;
 ```sh
 diffy                       # Repository containing the current directory
 diffy /path/to/repository   # A repository or a directory/file inside it
-diffy --no-watch            # Manual refresh only
 diffy --base main           # Committed changes since diverging from main
 diffy -b origin/main /repo  # Compare against a local remote-tracking ref
 diffy --help
@@ -84,8 +83,8 @@ directly to Branch after confirming a selection.
 
 Both revisions are pinned for each refresh so a moving branch cannot mix a file
 list from one commit with a preview from another. Watching recomputes the
-comparison when HEAD or the base ref changes; `r` does the same manually. If the
-base ref disappears, the last snapshot remains visible with an error. Remote
+comparison automatically when HEAD or the base ref changes. If the base ref
+disappears, the last snapshot remains visible with an error. Remote
 branches such as `origin/main` use existing local refs: diffy never checks out
 branches or fetches updates. Fetch them yourself when needed.
 
@@ -107,7 +106,6 @@ branches or fetches updates. Fetch them yourself when needed.
 | `Enter` / `Esc` while filtering | Apply filter |
 | `Ctrl+U` while filtering | Clear filter |
 | `Esc` outside filtering | Clear filter |
-| `r` | Refresh manually |
 | `?` / `F1` | Help (any key closes it) |
 | `q` / `Ctrl+C` | Quit |
 
@@ -131,12 +129,12 @@ stops and horizontal scrolling accounts for wide Unicode characters.
 - The viewer compares raw Git blobs with disk contents; Git clean/smudge filters
   and textconv transformations are not applied.
 - Watching is recursive, including ignored directories (changes there can cause
-  a harmless refresh). Large trees can hit OS watch limits. Use `--no-watch` and
-  `r` if native watching is unavailable or unreliable, such as on some network
-  filesystems. Changes are coalesced for 150 ms, with a 750 ms maximum delay during
-  continuous activity.
-- If watching fails at runtime, the app switches to manual refresh and displays
-  an error. If it cannot start watching, rerun with `--no-watch`.
+  a harmless refresh). Large trees can hit OS watch limits. Native filesystem
+  notifications are required and may be unreliable on some network filesystems.
+  Changes are coalesced for 150 ms, with a 750 ms maximum delay during continuous
+  activity.
+- If watching cannot start or fails at runtime, the app exits with an error,
+  restoring the terminal if needed.
 - Errors and panics restore the terminal before returning. Like other terminal
   apps, it cannot clean up after `SIGKILL`; use `reset` if necessary.
 

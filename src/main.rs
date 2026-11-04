@@ -19,7 +19,6 @@ use crate::{app::App, git::Repository, watch::Watcher};
 
 fn main() -> Result<()> {
     let mut path = None;
-    let mut no_watch = false;
     let mut base_branch = None;
     let mut positional = false;
     let mut args = env::args_os().skip(1);
@@ -27,10 +26,10 @@ fn main() -> Result<()> {
         if !positional && (arg == "--help" || arg == "-h") {
             println!(
                 "diffy — live Git diffs with Tree-sitter highlighting\n\n\
-                 Usage: diffy [--no-watch] [--base BRANCH] [PATH]\n\n\
+                 Usage: diffy [--base BRANCH] [PATH]\n\n\
                  PATH defaults to the current directory; subdirectories are accepted.\n\
-                 --no-watch     Disable filesystem watching (use r to refresh)\n\
                  --base, -b REF Compare merge-base(REF, HEAD) to HEAD (committed only)\n\n\
+                 Updates automatically when repository files or refs change.\n\
                  Keys: ←/→/Tab focus · ↑/↓/j/k move · s cycle views\n\
                        b select base branch · [/] hunks · / filter · ? help · q quit\n\n\
                  Read-only: never stages, discards, or changes your files."
@@ -39,8 +38,6 @@ fn main() -> Result<()> {
         } else if !positional && (arg == "--version" || arg == "-V") {
             println!("diffy {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
-        } else if !positional && arg == "--no-watch" {
-            no_watch = true;
         } else if !positional
             && (arg == "--base"
                 || arg == "-b"
@@ -74,11 +71,7 @@ fn main() -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("An interactive terminal is required. See diffy --help");
     }
-    let mut watcher = if no_watch {
-        None
-    } else {
-        Some(Watcher::new(&repo).context("Could not watch repository; try --no-watch")?)
-    };
+    let mut watcher = Watcher::new(&repo).context("Could not watch repository")?;
     let mut app = App::new(repo, base_branch)?;
 
     // Ratatui's panic hook and this guard both restore the terminal on exit.
@@ -86,18 +79,9 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::try_init().context("Could not initialize terminal")?;
     let mut dirty = true;
     loop {
-        let update = watcher.as_mut().map(Watcher::poll).transpose();
-        match update {
-            Ok(Some(true)) => {
-                app.refresh();
-                dirty = true;
-            }
-            Err(error) => {
-                app.error = Some(format!("Watcher: {error}; r refreshes manually"));
-                watcher = None;
-                dirty = true;
-            }
-            _ => {}
+        if watcher.poll().context("Filesystem watcher failed")? {
+            app.refresh();
+            dirty = true;
         }
         if dirty {
             terminal.draw(|frame| ui::draw(frame, &mut app))?;

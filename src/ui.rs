@@ -124,7 +124,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         )
     } else {
         Line::styled(
-            " ←/→/Tab focus · ↑/↓/j/k move · [/] hunks · b branch · r refresh · ? help · q quit",
+            " ←/→/Tab focus · ↑/↓/j/k move · [/] hunks · b branch · ? help · q quit",
             Style::default().fg(MUTED),
         )
     };
@@ -415,7 +415,6 @@ fn help(frame: &mut Frame, area: Rect) {
         Line::raw("b                   Select a base branch (type to filter)"),
         Line::raw("/                   Filter file paths (case-insensitive)"),
         Line::raw("Enter/Esc           Apply filter; Esc again clears it"),
-        Line::raw("r                   Refresh manually"),
         Line::raw("? / F1              Show help"),
         Line::raw("q / Ctrl+C          Quit"),
         Line::raw(""),

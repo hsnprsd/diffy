@@ -16,9 +16,22 @@ fn help_and_version_do_not_need_a_repository_or_terminal() {
 }
 
 #[test]
+fn help_describes_automatic_updates_and_pane_navigation() {
+    let output = diffy().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("Updates automatically"));
+    assert!(help.contains("←/→/Tab focus"));
+    assert!(help.contains("↑/↓/j/k move"));
+    assert!(!help.contains("--no-watch"));
+    assert!(!help.contains("n/p"));
+}
+
+#[test]
 fn invalid_arguments_fail_before_starting_the_ui() {
     for args in [
         vec!["--invalid"],
+        vec!["--no-watch"],
         vec!["first", "second"],
         vec!["--base"],
         vec!["-b"],
@@ -68,11 +81,7 @@ fn redirected_input_is_rejected_without_terminal_escape_sequences() {
             .unwrap()
             .success()
     );
-    let output = diffy()
-        .args(["--no-watch"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let output = diffy().arg(dir.path()).output().unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
