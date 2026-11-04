@@ -20,6 +20,8 @@ fn help_describes_automatic_updates_and_pane_navigation() {
     let output = diffy().arg("--help").output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("Staged and unstaged changes appear together"));
+    assert!(help.contains("s changes/branch view"));
     assert!(help.contains("Updates automatically"));
     assert!(help.contains("←/→/Tab focus"));
     assert!(help.contains("↑/↓/j/k move"));

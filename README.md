@@ -13,10 +13,10 @@ Ratatui, Tree-sitter, and native filesystem notifications.
   with fixed gutters, and a compact single-pane layout for narrow terminals.
 - **Black dark theme:** true-black panes, subtle charcoal panels, and colored diff
   highlights.
-- **Working tree, staged, and branch views:** inspect uncommitted changes or a
-  merge-request-style diff against another branch. Supports local/remote-tracking
-  refs, detached HEADs, and linked worktrees; uncommitted views also work on unborn
-  branches.
+- **Unified changes view and branch comparison:** inspect staged and unstaged
+  changes together, or a merge-request-style diff against another branch. Supports
+  local/remote-tracking refs, detached HEADs, and linked worktrees; the changes view
+  also works on unborn branches.
 - **Open in your editor:** press `e` in either pane to open the working-tree file
   in `$EDITOR`, then return to diffy when the editor exits. Opens at the first
   visible hunk in the Diff pane, or the file's first hunk in the Files pane.
@@ -61,16 +61,18 @@ diffy --help
 
 ### What each view compares
 
-| View | Before | After |
+| View / entry | Before | After |
 | --- | --- | --- |
-| Working tree (default) | Git index | Files on disk, including untracked files |
-| Staged | HEAD (empty on an unborn branch) | Git index |
+| Changes (default), `[ ]` unstaged | Git index | Files on disk, including untracked files |
+| Changes, `[x]` staged | HEAD (empty on an unborn branch) | Git index |
 | Branch (`--base REF` or `b`) | Merge base of REF and HEAD | HEAD |
 
-A partially staged file can appear in both views, with different changes.
-Renames are intentionally displayed as deletion/addition pairs. Unmerged files
-show conflict markers against the index's “ours” stage in the working-tree view;
-the staged view shows a notice until the conflict is resolved.
+**Changes** lists staged and unstaged entries together, sorted by path. A partially
+staged file has two adjacent entries, with separate diffs and staging controls:
+`[ ]` for its unstaged edits and `[x]` for its staged edits. The diff title also
+shows the selected entry's staging state. Renames are intentionally displayed as
+deletion/addition pairs. Unmerged files appear once, showing conflict markers
+against the index's “ours” stage.
 
 ### Compare against another branch
 
@@ -90,8 +92,8 @@ and remote-tracking branches with **`↑`/`↓`** (or `Tab`/`Shift+Tab`), then p
 the filter, and `Esc` cancels. The current base is highlighted when reopening the
 picker. You can still enter another ref, such as a tag or commit, when no branches
 match. Invalid refs leave the previous view intact. After a base is selected,
-**`s`** cycles through Working tree → Staged → Branch → Working tree; `b` jumps
-directly to Branch after confirming a selection.
+**`s`** switches between Changes and Branch; `b` jumps directly to Branch after
+confirming a selection. Without a selected base, `s` stays in Changes.
 
 Both revisions are pinned for each refresh so a moving branch cannot mix a file
 list from one commit with a preview from another. Watching recomputes the
@@ -109,7 +111,7 @@ fetches from its upstream), or fetch other remotes outside diffy when needed.
 | `Tab` / `Shift+Tab` | Switch focus between files and diff |
 | `Enter` | Focus the diff |
 | `j` / `k`, `↓` / `↑` | Select files in the Files pane; scroll in the Diff pane |
-| `Space` | Stage in Working tree / unstage in Staged: whole file in Files, first visible hunk in Diff |
+| `Space` | Stage an unstaged entry / unstage a staged entry: whole file in Files, first visible hunk in Diff |
 | `c` | Open the commit-message popup for staged changes |
 | `p` / `P` | Pull (fast-forward only) / push the current branch |
 | `e` | Open in `$EDITOR` at the first visible hunk (Diff pane) or first file hunk (Files pane) |
@@ -117,7 +119,7 @@ fetches from its upstream), or fetch other remotes outside diffy when needed.
 | `PageUp` / `PageDown`, `u` / `d` | Page up / down |
 | `Home` / `End`, `g` / `G` | First / last row or file |
 | `[` / `]` | Previous / next hunk |
-| `s` | Cycle working-tree / staged / branch views (branch requires a selected base) |
+| `s` | Switch changes / branch views (branch requires a selected base) |
 | `b` | Select the base branch from a searchable list and open the branch comparison |
 | `?` / `F1` | Help (any key closes it) |
 | `q` / `Ctrl+C` | Quit |
@@ -126,8 +128,9 @@ Below 80 columns, only the focused pane is shown; `←` / `→` or `Tab` switche
 
 ### Stage, unstage, and commit
 
-In **Working tree**, press **`Space`** to stage changes. In **Staged**, the same
-key unstages them. Use **`s`** to switch between these views.
+In **Changes**, press **`Space`** on an unstaged (`[ ]`) entry to stage changes,
+or on a staged (`[x]`) entry to unstage them. No view switch is needed. The
+selection stays on the same file when its staging state changes.
 
 - In the **Files pane**, `Space` acts on the entire selected file, including
   additions, deletions, binary files, and mode changes.
@@ -185,7 +188,7 @@ Vim/Neovim, nano, Emacs, and other `+LINE` editors are supported, along with Hel
 VS Code/VSCodium, Sublime Text, and Zed. The latter GUI editors receive `--wait`
 automatically; configure any other GUI editor to stay in the foreground.
 
-Editing always opens the **file on disk**, including from Staged and Branch views;
+Editing always opens the **file on disk**, including from staged entries and Branch;
 line numbers may differ if disk contents have changed since that revision. Missing
 files (including deleted files) and directories cannot be opened.
 
@@ -226,8 +229,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-Tests use isolated temporary Git repositories and cover staged/unstaged changes,
-conflicts, binary/large files, unusual paths, submodules, linked worktrees, all
+Tests use isolated temporary Git repositories and cover unified staged/unstaged
+entries, staging-aware selection on refresh, conflicts, binary/large files,
+unusual paths, submodules, linked worktrees, all
 bundled highlighting queries, diff hunks, keyboard navigation, editor commands
 and visible-hunk line mapping, small terminal layouts, filesystem/index/ref
 notifications, and CLI errors. Branch tests cover

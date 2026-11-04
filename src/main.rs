@@ -34,8 +34,9 @@ fn main() -> Result<()> {
                  Usage: diffy [--base BRANCH] [PATH]\n\n\
                  PATH defaults to the current directory; subdirectories are accepted.\n\
                  --base, -b REF Compare merge-base(REF, HEAD) to HEAD (committed only)\n\n\
+                 Staged and unstaged changes appear together in the Changes view.\n\
                  Updates automatically when repository files or refs change.\n\
-                 Keys: ←/→/Tab focus · ↑/↓/j/k move · s cycle views\n\
+                 Keys: ←/→/Tab focus · ↑/↓/j/k move · s changes/branch view\n\
                        Space stage/unstage file or hunk · c commit · p pull · P push\n\
                        e edit in $EDITOR · b select base branch · [/] hunks · ? help · q quit\n\n\
                  Commit popup: Ctrl+S commit · Enter newline · Esc cancel.\n\

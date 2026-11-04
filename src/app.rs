@@ -212,7 +212,7 @@ impl App {
         let branch = repo.branch()?;
         let mode = match &base_branch {
             Some(target) => repo.compare_branch(target)?,
-            None => Mode::Working,
+            None => Mode::Changes,
         };
         let files = repo.files(mode.clone())?;
         let mut app = Self {
@@ -270,17 +270,26 @@ impl App {
         // Read everything before replacing state, so failed comparisons keep the old view intact.
         let branch = self.repo.branch()?;
         let files = self.repo.files(mode.clone())?;
-        let selected = self.selected().map(|entry| entry.path.clone());
+        let selected = self
+            .selected()
+            .map(|entry| (entry.path.clone(), entry.staged));
         self.branch = branch;
         self.mode = mode;
         self.files = files;
         self.error = None;
-        let position = selected
-            .as_ref()
-            .and_then(|path| self.files.iter().position(|entry| &entry.path == path));
+        let position = selected.as_ref().and_then(|(path, staged)| {
+            self.files
+                .iter()
+                .position(|entry| &entry.path == path && entry.staged == *staged)
+                // Keep the same file selected when its staging state changes.
+                .or_else(|| self.files.iter().position(|entry| &entry.path == path))
+        });
         self.list_state
             .select(position.or_else(|| (!self.files.is_empty()).then_some(0)));
-        if reset_scroll || self.selected().map(|entry| &entry.path) != selected.as_ref() {
+        if reset_scroll
+            || self.selected().map(|entry| (&entry.path, entry.staged))
+                != selected.as_ref().map(|(path, staged)| (path, *staged))
+        {
             self.scroll = 0;
             self.horizontal = 0;
         }
@@ -297,12 +306,11 @@ impl App {
 
     fn cycle_mode(&mut self) -> Result<()> {
         let mode = match &self.mode {
-            Mode::Working => Mode::Staged,
-            Mode::Staged => match &self.base_branch {
+            Mode::Changes => match &self.base_branch {
                 Some(target) => self.repo.compare_branch(target)?,
-                None => Mode::Working,
+                None => return Ok(()),
             },
-            Mode::Branch { .. } => Mode::Working,
+            Mode::Branch { .. } => Mode::Changes,
         };
         self.update(mode, true)
     }
@@ -366,11 +374,12 @@ impl App {
         self.ensure_idle()?;
         anyhow::ensure!(
             !self.mode.is_branch(),
-            "Branch comparisons are read-only; press s to switch to Working tree"
+            "Branch comparisons are read-only; press s to switch to Changes"
         );
         let Some(entry) = self.selected() else {
             return Ok(());
         };
+        let staged = entry.staged;
         if self.focus == Focus::Files {
             self.repo.toggle_file(entry, &self.mode)?;
         } else {
@@ -382,7 +391,7 @@ impl App {
                 .repo
                 .files(self.mode.clone())?
                 .into_iter()
-                .find(|current| current.path == entry.path)
+                .find(|current| current.path == entry.path && current.staged == entry.staged)
                 .context("This file has changed; wait for the live refresh and try again")?;
             anyhow::ensure!(
                 current.status == entry.status && current.submodule == entry.submodule,
@@ -396,10 +405,10 @@ impl App {
             self.repo.toggle_hunk(entry, &self.mode, patch)?;
         }
         self.status = Some(Status::Success(
-            if self.mode == Mode::Working {
-                "Staged changes"
-            } else {
+            if staged {
                 "Unstaged changes"
+            } else {
+                "Staged changes"
             }
             .into(),
         ));
@@ -410,7 +419,7 @@ impl App {
     fn open_commit(&mut self) -> Result<()> {
         self.ensure_idle()?;
         anyhow::ensure!(
-            !self.repo.files(Mode::Staged)?.is_empty(),
+            !self.repo.staged_files()?.is_empty(),
             "No staged changes to commit; stage changes with Space first"
         );
         self.commit_popup = Some(CommitPopup::default());
@@ -1025,7 +1034,7 @@ mod tests {
                 .unwrap()
                 .contains("Cannot resolve")
         );
-        assert_eq!(app.mode, Mode::Working);
+        assert_eq!(app.mode, Mode::Changes);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.branch_picker.is_none());
         app.handle_key(key('b'));
@@ -1039,9 +1048,7 @@ mod tests {
         assert_eq!(app.repo.branch().unwrap(), "feature");
         assert_eq!(app.files.len(), 3);
         app.handle_key(key('s'));
-        assert_eq!(app.mode, Mode::Working);
-        app.handle_key(key('s'));
-        assert_eq!(app.mode, Mode::Staged);
+        assert_eq!(app.mode, Mode::Changes);
         app.handle_key(key('s'));
         assert!(app.mode.is_branch());
         let mode = app.mode.clone();
@@ -1182,7 +1189,7 @@ mod tests {
                 .unwrap()
                 .contains("Enter a base branch")
         );
-        assert_eq!(app.mode, Mode::Working);
+        assert_eq!(app.mode, Mode::Changes);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.branch_picker.is_none());
     }
@@ -1225,11 +1232,10 @@ mod tests {
         let (dir, repo) = diverged_repo();
         let mut app = App::new(repo, Some("main".into())).unwrap();
         app.handle_key(key('s'));
-        app.handle_key(key('s'));
-        assert_eq!(app.mode, Mode::Staged);
+        assert_eq!(app.mode, Mode::Changes);
         git(dir.path(), &["branch", "-D", "main"]);
         app.handle_key(key('s'));
-        assert_eq!(app.mode, Mode::Staged);
+        assert_eq!(app.mode, Mode::Changes);
         assert!(app.error.is_some());
     }
 
@@ -1242,7 +1248,7 @@ mod tests {
             assert!(!app.handle_key(key(ch)));
         }
         assert_eq!(app.branch_picker.as_ref().unwrap().input, "qs?j/k");
-        assert_eq!(app.mode, Mode::Working);
+        assert_eq!(app.mode, Mode::Changes);
         assert!(!app.show_help);
         app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(app.branch_picker.as_ref().unwrap().input, "");
@@ -1269,15 +1275,18 @@ mod tests {
         let working = std::fs::read_to_string(&path).unwrap();
         app.handle_key(key(' '));
         assert!(app.error.is_none(), "{:?}", app.error);
-        assert!(app.files.is_empty());
-        app.handle_key(key('s'));
-        assert_eq!(app.mode, Mode::Staged);
+        assert_eq!(app.files.len(), 1);
+        assert_eq!(app.mode, Mode::Changes);
+        assert!(app.selected().unwrap().staged);
         assert_eq!(app.view.hunks.len(), 1); // New file on an unborn branch.
         app.handle_key(key(' '));
-        assert!(app.files.is_empty());
-        assert!(app.repo.files(Mode::Staged).unwrap().is_empty());
+        assert_eq!(app.files.len(), 1);
+        assert!(!app.selected().unwrap().staged);
+        assert!(app.repo.staged_files().unwrap().is_empty());
         assert_eq!(std::fs::read_to_string(path).unwrap(), working);
+        // Without a base branch, s leaves the combined view unchanged.
         app.handle_key(key('s'));
+        assert_eq!(app.mode, Mode::Changes);
         assert_eq!(app.files.len(), 1);
     }
 
@@ -1295,36 +1304,80 @@ mod tests {
         app.handle_key(key(' '));
         assert!(app.error.is_none(), "{:?}", app.error);
         assert_eq!(app.view.hunks.len(), 2);
-        let staged = app.repo.files(Mode::Staged).unwrap();
+        assert_eq!(app.files.len(), 2);
+        assert!(!app.selected().unwrap().staged);
+        let staged = app.repo.staged_files().unwrap();
         let staged_text =
-            crate::git::tests::text(app.repo.contents(&staged[0], Mode::Staged).unwrap().1);
+            crate::git::tests::text(app.repo.contents(&staged[0], Mode::Changes).unwrap().1);
         assert!(staged_text.contains("changed 50\n"));
         assert!(!staged_text.contains("changed 10\n"));
         assert!(!staged_text.contains("changed 80\n"));
         let working = std::fs::read_to_string(dir.path().join("a file.txt")).unwrap();
-        app.handle_key(key('s'));
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(key('j')); // Select the staged entry in the same view.
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(app.selected().unwrap().staged);
         assert_eq!(app.view.hunks.len(), 1);
         app.handle_key(key(' '));
-        assert!(app.repo.files(Mode::Staged).unwrap().is_empty());
+        assert!(app.repo.staged_files().unwrap().is_empty());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a file.txt")).unwrap(),
             working
         );
         // Whole-file stage, then unstage the middle hunk only.
-        app.handle_key(key('s'));
         app.focus = Focus::Files;
         app.handle_key(key(' '));
-        app.handle_key(key('s'));
+        assert!(app.selected().unwrap().staged);
         app.handle_key(key(']'));
         app.handle_key(key(' '));
         assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(app.selected().unwrap().staged);
         assert_eq!(app.view.hunks.len(), 2);
-        let staged = app.repo.files(Mode::Staged).unwrap();
+        let staged = app.repo.staged_files().unwrap();
         let staged_text =
-            crate::git::tests::text(app.repo.contents(&staged[0], Mode::Staged).unwrap().1);
+            crate::git::tests::text(app.repo.contents(&staged[0], Mode::Changes).unwrap().1);
         assert!(staged_text.contains("changed 10\n"));
         assert!(!staged_text.contains("changed 50\n"));
         assert!(staged_text.contains("changed 80\n"));
+    }
+
+    #[test]
+    fn refresh_preserves_the_selected_staging_state_and_resets_scroll_when_it_changes() {
+        let (dir, mut app) = app_with_hunks();
+        git(dir.path(), &["commit", "-qm", "Initial"]);
+        app.refresh();
+        app.handle_key(key(' '));
+        assert!(app.selected().unwrap().staged);
+        app.viewport_height = 4;
+        app.handle_key(key(']'));
+        app.handle_key(key('j'));
+        app.horizontal = 4;
+        let scroll = app.scroll;
+        let source = app.view.source.clone();
+
+        // A new unstaged entry sorts before the currently selected staged entry.
+        let path = dir.path().join("a file.txt");
+        let working = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("changed 80", "newer 80");
+        std::fs::write(&path, &working).unwrap();
+        app.refresh();
+        assert_eq!(app.files.len(), 2);
+        assert_eq!(app.list_state.selected(), Some(1));
+        assert!(app.selected().unwrap().staged);
+        assert_eq!(app.view.source, source);
+        assert_eq!(app.scroll, scroll);
+        assert_eq!(app.horizontal, 4);
+
+        // Removing that staged entry keeps the file selected, not its old scroll.
+        git(dir.path(), &["reset", "-q", "--", "a file.txt"]);
+        app.refresh();
+        assert_eq!(app.files.len(), 1);
+        assert_eq!(app.selected().unwrap().path, PathBuf::from("a file.txt"));
+        assert!(!app.selected().unwrap().staged);
+        assert_eq!(app.scroll, 0);
+        assert_eq!(app.horizontal, 0);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), working);
     }
 
     #[test]
@@ -1336,11 +1389,29 @@ mod tests {
         std::fs::write(dir.path().join("a file.txt"), "newer edits\n").unwrap();
         app.handle_key(key(' '));
         assert!(app.error.as_ref().unwrap().contains("has changed"));
-        assert!(app.repo.files(Mode::Staged).unwrap().is_empty());
+        assert!(app.repo.staged_files().unwrap().is_empty());
         app.refresh();
         app.handle_key(key(' '));
         assert!(app.error.is_none(), "{:?}", app.error);
-        assert!(app.files.is_empty());
+        assert_eq!(app.files.len(), 1);
+        assert!(app.selected().unwrap().staged);
+    }
+
+    #[test]
+    fn externally_staged_hunks_are_not_toggled_again_before_refresh() {
+        let (dir, mut app) = app_with_hunks();
+        git(dir.path(), &["commit", "-qm", "Initial"]);
+        app.refresh();
+        app.focus = Focus::Diff;
+        git(dir.path(), &["add", "--", "a file.txt"]);
+        app.handle_key(key(' '));
+        assert!(app.error.as_ref().unwrap().contains("has changed"));
+        assert_eq!(app.repo.staged_files().unwrap().len(), 1);
+        app.refresh();
+        assert!(app.selected().unwrap().staged);
+        app.handle_key(key(' '));
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(app.view.hunks.len(), 2);
     }
 
     #[test]
@@ -1357,17 +1428,17 @@ mod tests {
         app.focus = Focus::Diff;
         app.handle_key(key(' '));
         assert!(app.error.as_ref().unwrap().contains("No text hunk"));
-        assert!(app.repo.files(Mode::Staged).unwrap().is_empty());
+        assert!(app.repo.staged_files().unwrap().is_empty());
         app.focus = Focus::Files;
         app.handle_key(key(' '));
-        assert_eq!(app.repo.files(Mode::Staged).unwrap().len(), 1);
+        assert_eq!(app.repo.staged_files().unwrap().len(), 1);
         let (_dir, repo) = diverged_repo();
         let mut app = App::new(repo, Some("main".into())).unwrap();
         for focus in [Focus::Files, Focus::Diff] {
             app.focus = focus;
             app.handle_key(key(' '));
             assert!(app.error.as_ref().unwrap().contains("read-only"));
-            assert!(app.repo.files(Mode::Staged).unwrap().is_empty());
+            assert!(app.repo.staged_files().unwrap().is_empty());
         }
     }
 
@@ -1382,7 +1453,7 @@ mod tests {
         app.handle_paste("Cancelled message");
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.commit_popup.is_none());
-        assert_eq!(app.repo.files(Mode::Staged).unwrap().len(), 1);
+        assert_eq!(app.repo.staged_files().unwrap().len(), 1);
         app.handle_key(key('c'));
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert!(
@@ -1414,10 +1485,10 @@ mod tests {
         wait_for_operation(&mut app);
         assert!(app.commit_popup.is_none(), "{:?}", app.error);
         assert!(app.error.is_none(), "{:?}", app.error);
-        assert!(app.repo.files(Mode::Staged).unwrap().is_empty());
+        assert!(app.repo.staged_files().unwrap().is_empty());
         assert_eq!(app.files.len(), 1);
         assert_eq!(
-            crate::git::tests::text(app.repo.contents(&app.files[0], Mode::Working).unwrap().0),
+            crate::git::tests::text(app.repo.contents(&app.files[0], Mode::Changes).unwrap().0),
             "staged\n"
         );
         assert_eq!(
@@ -1480,12 +1551,12 @@ mod tests {
                 .unwrap()
                 .contains("Commit rejected by test hook")
         );
-        assert_eq!(app.repo.files(Mode::Staged).unwrap().len(), 1);
+        assert_eq!(app.repo.staged_files().unwrap().len(), 1);
         std::fs::remove_file(hook).unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         wait_for_operation(&mut app);
         assert!(app.commit_popup.is_none(), "{:?}", app.error);
-        assert!(app.repo.files(Mode::Staged).unwrap().is_empty());
+        assert!(app.repo.staged_files().unwrap().is_empty());
     }
 
     #[test]

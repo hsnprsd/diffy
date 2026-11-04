@@ -60,18 +60,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ]);
     frame.render_widget(Paragraph::new(header), chunks[0]);
 
-    let tab_style = |mode| {
-        if app.mode == mode {
-            Style::default().fg(ACCENT).bold()
-        } else {
-            Style::default().fg(MUTED)
-        }
-    };
     let mut tabs = vec![
         Span::styled(" [s] ", Style::default().fg(MUTED)),
-        Span::styled("Working tree", tab_style(Mode::Working)),
-        Span::raw("  ·  "),
-        Span::styled("Staged", tab_style(Mode::Staged)),
+        Span::styled(
+            "Changes",
+            if app.mode == Mode::Changes {
+                Style::default().fg(ACCENT).bold()
+            } else {
+                Style::default().fg(MUTED)
+            },
+        ),
     ];
     tabs.push(Span::raw("  ·  "));
     tabs.push(Span::styled("[b] ", Style::default().fg(MUTED)));
@@ -151,10 +149,10 @@ fn files(frame: &mut Frame, app: &mut App, area: Rect) {
         app.focus == Focus::Files,
     );
     if !app.mode.is_branch() {
-        block = block.title_bottom(if app.mode == Mode::Working {
-            " Space stage file "
-        } else {
+        block = block.title_bottom(if app.selected().is_some_and(|entry| entry.staged) {
             " Space unstage file "
+        } else {
+            " Space stage file "
         });
     }
     let inner = block.inner(area);
@@ -167,10 +165,19 @@ fn files(frame: &mut Frame, app: &mut App, area: Rect) {
                 'D' | 'U' => RED,
                 _ => ACCENT,
             };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{} ", entry.status), Style::default().fg(color)),
-                Span::raw(safe_text(&entry.path.to_string_lossy())),
-            ]))
+            let mut spans = Vec::new();
+            if !app.mode.is_branch() {
+                spans.push(Span::styled(
+                    if entry.staged { "[x] " } else { "[ ] " },
+                    Style::default().fg(if entry.staged { GREEN } else { MUTED }),
+                ));
+            }
+            spans.push(Span::styled(
+                format!("{} ", entry.status),
+                Style::default().fg(color),
+            ));
+            spans.push(Span::raw(safe_text(&entry.path.to_string_lossy())));
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let list = List::new(items)
@@ -189,7 +196,17 @@ fn files(frame: &mut Frame, app: &mut App, area: Rect) {
 fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = app
         .selected()
-        .map(|entry| safe_text(&entry.path.to_string_lossy()))
+        .map(|entry| {
+            let path = safe_text(&entry.path.to_string_lossy());
+            if app.mode.is_branch() {
+                path
+            } else {
+                format!(
+                    "{path} · {}",
+                    if entry.staged { "Staged" } else { "Unstaged" }
+                )
+            }
+        })
         .unwrap_or_else(|| app.mode.label().into());
     let language = app.view.language.map_or("Text", |language| language.name());
     let mut summary = Line::from(vec![
@@ -214,10 +231,10 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
     ]);
     if !app.mode.is_branch() {
         summary.spans.push(Span::styled(
-            if app.mode == Mode::Working {
-                "· Space stage hunk "
-            } else {
+            if app.selected().is_some_and(|entry| entry.staged) {
                 "· Space unstage hunk "
+            } else {
+                "· Space stage hunk "
             },
             Style::default().fg(MUTED),
         ));
@@ -493,17 +510,17 @@ fn help(frame: &mut Frame, area: Rect) {
         Line::raw("PgUp/PgDn or u/d    Page up / down"),
         Line::raw("Home/End or g/G     First / last row or file"),
         Line::raw("[ / ]               Previous / next hunk"),
-        Line::raw("s                   Cycle working tree / staged / branch"),
+        Line::raw("s                   Switch changes / branch comparison"),
         Line::raw("b                   Switch base branch (type to filter)"),
         Line::raw("? / F1              Show help"),
         Line::raw("q / Ctrl+C          Quit"),
         Line::raw(""),
         Line::styled(
-            "Working tree = index → disk, including untracked files",
+            "Changes: [ ] unstaged (index → disk), [x] staged (HEAD → index)",
             Style::default().fg(MUTED),
         ),
         Line::styled(
-            "Staged = HEAD → index. Renames appear as delete/add.",
+            "Partially staged files have both entries. Renames = delete/add.",
             Style::default().fg(MUTED),
         ),
         Line::styled(
@@ -664,10 +681,15 @@ mod tests {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
         git(dir.path(), &["add", "."]);
+        std::fs::write(dir.path().join("file.txt"), "unstaged\n").unwrap();
         let mut app = App::new(repo, None).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = screen(&terminal);
+        assert!(text.contains("[s] Changes  ·  [b] Compare branch"));
+        assert!(text.contains("[ ] M file.txt"));
+        assert!(text.contains("[x] A file.txt"));
+        assert!(text.contains("file.txt · Unstaged"));
         for hint in [
             "Space stage file",
             "Space stage/unstage",
@@ -678,9 +700,12 @@ mod tests {
         ] {
             assert!(text.contains(hint), "Missing hint: {hint}");
         }
-        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert!(screen(&terminal).contains("Space unstage file"));
+        let text = screen(&terminal);
+        assert!(text.contains("Space unstage file"));
+        assert!(text.contains("file.txt · Staged"));
+        assert!(text.contains("Space unstage hunk"));
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         app.handle_paste("Commit 界\n\nMessage body");
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();

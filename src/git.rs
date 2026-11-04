@@ -14,8 +14,7 @@ pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
-    Working,
-    Staged,
+    Changes,
     // Pin both revisions so the file list and previews always use the same commits.
     Branch {
         merge_base: String,
@@ -26,8 +25,7 @@ pub enum Mode {
 impl Mode {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Working => "Working tree",
-            Self::Staged => "Staged",
+            Self::Changes => "Changes",
             Self::Branch { .. } => "Branch",
         }
     }
@@ -42,6 +40,7 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub status: char,
     pub submodule: bool,
+    pub staged: bool,
 }
 
 #[derive(Debug)]
@@ -177,6 +176,51 @@ impl Repository {
     }
 
     pub fn files(&self, mode: Mode) -> Result<Vec<FileEntry>> {
+        match mode {
+            Mode::Changes => {
+                let mut files = self.unstaged_files()?;
+                // Conflicts are not staged changes; show their working-tree preview only.
+                files.extend(
+                    self.staged_files()?
+                        .into_iter()
+                        .filter(|entry| entry.status != 'U'),
+                );
+                files.sort_by(|a, b| (&a.path, a.staged).cmp(&(&b.path, b.staged)));
+                Ok(files)
+            }
+            Mode::Branch { merge_base, head } => self.diff_files(&[&merge_base, &head], false),
+        }
+    }
+
+    pub fn staged_files(&self) -> Result<Vec<FileEntry>> {
+        self.diff_files(&["--cached"], true)
+    }
+
+    fn unstaged_files(&self) -> Result<Vec<FileEntry>> {
+        let mut files: BTreeMap<_, _> = self
+            .diff_files(&[], false)?
+            .into_iter()
+            .map(|entry| (entry.path.clone(), entry))
+            .collect();
+        let output = self.output(&["ls-files", "--others", "--exclude-standard", "-z", "--"])?;
+        ensure_success(&output)?;
+        for path in output
+            .stdout
+            .split(|&byte| byte == 0)
+            .filter(|p| !p.is_empty())
+        {
+            let path = PathBuf::from(os_from_bytes(path));
+            files.entry(path.clone()).or_insert(FileEntry {
+                path,
+                status: '?',
+                submodule: false,
+                staged: false,
+            });
+        }
+        Ok(files.into_values().collect())
+    }
+
+    fn diff_files(&self, revisions: &[&str], staged: bool) -> Result<Vec<FileEntry>> {
         // NUL-delimited paths preserve spaces, newlines, and non-UTF-8 filenames.
         // Disabling renames also makes each side independently inspectable.
         let mut args = vec![
@@ -188,11 +232,7 @@ impl Repository {
             "--raw",
             "-z",
         ];
-        match &mode {
-            Mode::Working => {}
-            Mode::Staged => args.push("--cached"),
-            Mode::Branch { merge_base, head } => args.extend([merge_base.as_str(), head.as_str()]),
-        }
+        args.extend_from_slice(revisions);
         args.push("--");
         let output = self.output(&args)?;
         ensure_success(&output)?;
@@ -223,24 +263,8 @@ impl Repository {
                     path,
                     status,
                     submodule,
+                    staged,
                 });
-        }
-        if mode == Mode::Working {
-            let output =
-                self.output(&["ls-files", "--others", "--exclude-standard", "-z", "--"])?;
-            ensure_success(&output)?;
-            for path in output
-                .stdout
-                .split(|&byte| byte == 0)
-                .filter(|p| !p.is_empty())
-            {
-                let path = PathBuf::from(os_from_bytes(path));
-                files.entry(path.clone()).or_insert(FileEntry {
-                    path,
-                    status: '?',
-                    submodule: false,
-                });
-            }
         }
         Ok(files.into_values().collect())
     }
@@ -252,20 +276,20 @@ impl Repository {
                 Content::empty(),
             ));
         }
-        if entry.status == 'U' && mode == Mode::Staged {
+        if entry.status == 'U' && entry.staged && !mode.is_branch() {
             return Ok((
-                Content::Notice("Unmerged index — inspect conflict markers in Working tree"),
+                Content::Notice("Unmerged index — inspect conflict markers in Changes"),
                 Content::empty(),
             ));
         }
         let old = if matches!(entry.status, 'A' | '?') {
             Content::empty()
         } else {
-            let revision = match (&mode, entry.status) {
-                (Mode::Working, 'U') => ":2:".to_owned(),
-                (Mode::Working, _) => ":".to_owned(),
-                (Mode::Staged, _) => "HEAD:".to_owned(),
-                (Mode::Branch { merge_base, .. }, _) => format!("{merge_base}:"),
+            let revision = match &mode {
+                Mode::Changes if entry.staged => "HEAD:".to_owned(),
+                Mode::Changes if entry.status == 'U' => ":2:".to_owned(),
+                Mode::Changes => ":".to_owned(),
+                Mode::Branch { merge_base, .. } => format!("{merge_base}:"),
             };
             self.blob(&revision, &entry.path)?
         };
@@ -273,8 +297,8 @@ impl Repository {
             Content::empty()
         } else {
             match mode {
-                Mode::Working => self.worktree_file(&entry.path)?,
-                Mode::Staged => self.blob(":", &entry.path)?,
+                Mode::Changes if entry.staged => self.blob(":", &entry.path)?,
+                Mode::Changes => self.worktree_file(&entry.path)?,
                 Mode::Branch { head, .. } => self.blob(&format!("{head}:"), &entry.path)?,
             }
         };
@@ -283,14 +307,16 @@ impl Repository {
 
     pub fn toggle_file(&self, entry: &FileEntry, mode: &Mode) -> Result<()> {
         let mut cmd = command(&self.root);
-        match mode {
-            Mode::Working => cmd.args(["add", "-A"]),
+        anyhow::ensure!(
+            !mode.is_branch(),
+            "Switch to Changes to stage/unstage changes"
+        );
+        if entry.staged {
             // Reset also works on unborn branches and never changes files on disk.
-            Mode::Staged => cmd.args(["reset", "-q"]),
-            Mode::Branch { .. } => {
-                bail!("Switch to Working tree or Staged to stage/unstage changes")
-            }
-        };
+            cmd.args(["reset", "-q"]);
+        } else {
+            cmd.args(["add", "-A"]);
+        }
         let output = cmd.arg("--").arg(&entry.path).output()?;
         ensure_success(&output)
     }
@@ -312,7 +338,7 @@ impl Repository {
         );
         let mut cmd = command(&self.root);
         cmd.args(["apply", "--cached", "--whitespace=nowarn"]);
-        if *mode == Mode::Staged {
+        if entry.staged {
             cmd.arg("--reverse");
         }
         let output = with_input(cmd, patch.as_bytes())?;
@@ -631,18 +657,21 @@ pub mod tests {
         fs::write(dir.path().join(".gitignore"), "ignored\n").unwrap();
         fs::write(dir.path().join("ignored"), "ignore me").unwrap();
         assert_eq!(repo.branch().unwrap(), "main");
-        assert!(repo.files(Mode::Staged).unwrap().is_empty());
-        assert_eq!(repo.files(Mode::Working).unwrap().len(), 2);
+        assert!(repo.staged_files().unwrap().is_empty());
+        assert_eq!(repo.files(Mode::Changes).unwrap().len(), 2);
         git(dir.path(), &["add", "new.rs"]);
-        let staged = repo.files(Mode::Staged).unwrap();
-        assert_eq!(staged[0].status, 'A');
-        let (old, new) = repo.contents(&staged[0], Mode::Staged).unwrap();
+        let files = repo.files(Mode::Changes).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(!files[0].staged);
+        assert!(files[1].staged);
+        assert_eq!(files[1].status, 'A');
+        let (old, new) = repo.contents(&files[1], Mode::Changes).unwrap();
         assert_eq!(text(old), "");
         assert_eq!(text(new), "fn main() {}\n");
     }
 
     #[test]
-    fn working_and_staged_are_separate() {
+    fn changes_include_both_sides_of_partially_staged_files() {
         let (dir, repo) = repo();
         let path = dir.path().join("space and\nnewline.rs");
         fs::write(&path, "original\n").unwrap();
@@ -651,22 +680,64 @@ pub mod tests {
         fs::write(&path, "staged\n").unwrap();
         git(dir.path(), &["add", "."]);
         fs::write(&path, "working\n").unwrap();
-        for (mode, expected) in [
-            (Mode::Working, ("staged\n", "working\n")),
-            (Mode::Staged, ("original\n", "staged\n")),
-        ] {
-            let files = repo.files(mode.clone()).unwrap();
-            assert_eq!(files.len(), 1);
-            let (old, new) = repo.contents(&files[0], mode).unwrap();
-            assert_eq!(
-                (text(old), text(new)),
-                (expected.0.into(), expected.1.into())
-            );
+        let files = repo.files(Mode::Changes).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, files[1].path);
+        for (entry, (staged, before, after)) in files.iter().zip([
+            (false, "staged\n", "working\n"),
+            (true, "original\n", "staged\n"),
+        ]) {
+            assert_eq!(entry.staged, staged);
+            let (old, new) = repo.contents(entry, Mode::Changes).unwrap();
+            assert_eq!((text(old), text(new)), (before.into(), after.into()));
         }
+        // Opposing edits must remain visible even when disk matches HEAD.
+        fs::write(&path, "original\n").unwrap();
+        assert_eq!(repo.files(Mode::Changes).unwrap().len(), 2);
         fs::remove_file(path).unwrap();
-        let files = repo.files(Mode::Working).unwrap();
+        let files = repo.files(Mode::Changes).unwrap();
+        assert_eq!(files.len(), 2);
         assert_eq!(files[0].status, 'D');
-        assert_eq!(text(repo.contents(&files[0], Mode::Working).unwrap().1), "");
+        assert_eq!(text(repo.contents(&files[0], Mode::Changes).unwrap().1), "");
+    }
+
+    #[test]
+    fn changes_sort_staged_unstaged_and_restored_deletions_by_path() {
+        let (dir, repo) = repo();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(dir.path().join(name), "original\n").unwrap();
+        }
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "Initial"]);
+        fs::write(dir.path().join("a.txt"), "staged\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+        fs::write(dir.path().join("b.txt"), "unstaged\n").unwrap();
+        git(dir.path(), &["rm", "c.txt"]);
+        fs::write(dir.path().join("c.txt"), "original\n").unwrap();
+        fs::write(dir.path().join("z.txt"), "untracked\n").unwrap();
+
+        let files = repo.files(Mode::Changes).unwrap();
+        let entries: Vec<_> = files
+            .iter()
+            .map(|entry| (entry.path.to_str().unwrap(), entry.status, entry.staged))
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                ("a.txt", 'M', true),
+                ("b.txt", 'M', false),
+                ("c.txt", '?', false),
+                ("c.txt", 'D', true),
+                ("z.txt", '?', false),
+            ]
+        );
+        for (entry, (before, after)) in files[2..4]
+            .iter()
+            .zip([("", "original\n"), ("original\n", "")])
+        {
+            let (old, new) = repo.contents(entry, Mode::Changes).unwrap();
+            assert_eq!((text(old), text(new)), (before.into(), after.into()));
+        }
     }
 
     #[test]
@@ -674,9 +745,9 @@ pub mod tests {
         let (dir, repo) = repo();
         fs::write(dir.path().join("binary"), [0, 1, 2]).unwrap();
         fs::write(dir.path().join("large"), vec![b'a'; MAX_FILE_BYTES + 1]).unwrap();
-        for entry in repo.files(Mode::Working).unwrap() {
+        for entry in repo.files(Mode::Changes).unwrap() {
             assert!(matches!(
-                repo.contents(&entry, Mode::Working).unwrap().1,
+                repo.contents(&entry, Mode::Changes).unwrap().1,
                 Content::Notice(_)
             ));
         }
@@ -704,9 +775,9 @@ pub mod tests {
     fn symlinks_are_not_followed() {
         let (dir, repo) = repo();
         std::os::unix::fs::symlink("/nonexistent/target", dir.path().join("link")).unwrap();
-        let files = repo.files(Mode::Working).unwrap();
+        let files = repo.files(Mode::Changes).unwrap();
         assert_eq!(
-            text(repo.contents(&files[0], Mode::Working).unwrap().1),
+            text(repo.contents(&files[0], Mode::Changes).unwrap().1),
             "/nonexistent/target"
         );
     }
@@ -729,14 +800,16 @@ pub mod tests {
             .output()
             .unwrap();
         assert!(!merge.status.success());
-        let files = repo.files(Mode::Working).unwrap();
+        let files = repo.files(Mode::Changes).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].status, 'U');
-        let (old, new) = repo.contents(&files[0], Mode::Working).unwrap();
+        assert!(!files[0].staged);
+        let (old, new) = repo.contents(&files[0], Mode::Changes).unwrap();
         assert_eq!(text(old), "ours\n");
         assert!(text(new).contains("<<<<<<<"));
+        let staged = repo.staged_files().unwrap();
         assert!(matches!(
-            repo.contents(&files[0], Mode::Staged).unwrap().0,
+            repo.contents(&staged[0], Mode::Changes).unwrap().0,
             Content::Notice(_)
         ));
     }
@@ -753,11 +826,12 @@ pub mod tests {
                 "160000,1111111111111111111111111111111111111111,sub",
             ],
         );
-        let files = repo.files(Mode::Staged).unwrap();
+        let files = repo.staged_files().unwrap();
         assert_eq!(files.len(), 1);
         assert!(files[0].submodule);
+        assert!(files[0].staged);
         assert!(matches!(
-            repo.contents(&files[0], Mode::Staged).unwrap().0,
+            repo.contents(&files[0], Mode::Changes).unwrap().0,
             Content::Notice(_)
         ));
     }
@@ -771,9 +845,9 @@ pub mod tests {
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-qm", "Initial"]);
         fs::write(dir.path().join(&name), "new\n").unwrap();
-        let files = repo.files(Mode::Working).unwrap();
+        let files = repo.files(Mode::Changes).unwrap();
         assert_eq!(files[0].path.as_os_str(), name);
-        let (old, new) = repo.contents(&files[0], Mode::Working).unwrap();
+        let (old, new) = repo.contents(&files[0], Mode::Changes).unwrap();
         assert_eq!((text(old), text(new)), ("old\n".into(), "new\n".into()));
     }
 
@@ -786,9 +860,10 @@ pub mod tests {
         git(dir.path(), &["checkout", "--detach", "-q"]);
         assert!(repo.branch().unwrap().ends_with(" (detached)"));
         git(dir.path(), &["rm", "delete.txt"]);
-        let files = repo.files(Mode::Staged).unwrap();
+        let files = repo.files(Mode::Changes).unwrap();
         assert_eq!(files[0].status, 'D');
-        let (old, new) = repo.contents(&files[0], Mode::Staged).unwrap();
+        assert!(files[0].staged);
+        let (old, new) = repo.contents(&files[0], Mode::Changes).unwrap();
         assert_eq!((text(old), text(new)), ("goodbye\n".into(), "".into()));
     }
 
@@ -929,9 +1004,14 @@ pub mod tests {
         assert!(error.contains("No common ancestor"));
     }
 
-    fn selected_view(repo: &Repository, mode: Mode) -> (FileEntry, crate::diff::DiffView) {
-        let entry = repo.files(mode.clone()).unwrap().remove(0);
-        let (old, new) = repo.contents(&entry, mode).unwrap();
+    fn selected_view(repo: &Repository, staged: bool) -> (FileEntry, crate::diff::DiffView) {
+        let entry = repo
+            .files(Mode::Changes)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.staged == staged)
+            .unwrap();
+        let (old, new) = repo.contents(&entry, Mode::Changes).unwrap();
         let view = crate::diff::DiffView::build(
             &entry.path,
             old,
@@ -961,15 +1041,15 @@ pub mod tests {
         let path = ":(glob)*.txt";
         fs::write(dir.path().join(path), "selected\n").unwrap();
         fs::write(dir.path().join("other.txt"), "not selected\n").unwrap();
-        let entry = repo.files(Mode::Working).unwrap().remove(0);
+        let entry = repo.files(Mode::Changes).unwrap().remove(0);
         assert_eq!(entry.path, Path::new(path));
-        repo.toggle_file(&entry, &Mode::Working).unwrap();
-        let staged = repo.files(Mode::Staged).unwrap();
+        repo.toggle_file(&entry, &Mode::Changes).unwrap();
+        let staged = repo.staged_files().unwrap();
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].path, entry.path);
         fs::write(dir.path().join(path), "later edits\n").unwrap();
-        repo.toggle_file(&staged[0], &Mode::Staged).unwrap();
-        assert!(repo.files(Mode::Staged).unwrap().is_empty());
+        repo.toggle_file(&staged[0], &Mode::Changes).unwrap();
+        assert!(repo.staged_files().unwrap().is_empty());
         assert_eq!(
             fs::read_to_string(dir.path().join(path)).unwrap(),
             "later edits\n"
@@ -998,23 +1078,24 @@ pub mod tests {
             .replace("line 2\r\n", "first\r\nextra\r\n")
             .replace("line 39\r\nline 40\r\n", "last");
         fs::write(&path, &new).unwrap();
-        let (entry, view) = selected_view(&repo, Mode::Working);
+        let (entry, view) = selected_view(&repo, false);
         assert_eq!(view.hunks.len(), 2);
-        repo.toggle_hunk(&entry, &Mode::Working, &view.patches[1])
+        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[1])
             .unwrap();
         assert_eq!(
             text(repo.blob(":", &entry.path).unwrap()),
             old.replace("line 39\r\nline 40\r\n", "last")
         );
-        let (entry, staged) = selected_view(&repo, Mode::Staged);
-        repo.toggle_hunk(&entry, &Mode::Staged, &staged.patches[0])
+        let (entry, staged) = selected_view(&repo, true);
+        repo.toggle_hunk(&entry, &Mode::Changes, &staged.patches[0])
             .unwrap();
-        assert!(repo.files(Mode::Staged).unwrap().is_empty());
+        assert!(repo.staged_files().unwrap().is_empty());
         assert_eq!(fs::read_to_string(&path).unwrap(), new);
         // Stage everything, then unstage only the first hunk; the second stays staged.
-        repo.toggle_file(&entry, &Mode::Working).unwrap();
-        let (entry, staged) = selected_view(&repo, Mode::Staged);
-        repo.toggle_hunk(&entry, &Mode::Staged, &staged.patches[0])
+        let (entry, _) = selected_view(&repo, false);
+        repo.toggle_file(&entry, &Mode::Changes).unwrap();
+        let (entry, staged) = selected_view(&repo, true);
+        repo.toggle_hunk(&entry, &Mode::Changes, &staged.patches[0])
             .unwrap();
         assert_eq!(
             text(repo.blob(":", &entry.path).unwrap()),
@@ -1032,8 +1113,8 @@ pub mod tests {
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-qm", "Initial"]);
         fs::write(dir.path().join(&name), "new\n").unwrap();
-        let (entry, view) = selected_view(&repo, Mode::Working);
-        repo.toggle_hunk(&entry, &Mode::Working, &view.patches[0])
+        let (entry, view) = selected_view(&repo, false);
+        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[0])
             .unwrap();
         assert_eq!(text(repo.blob(":", &entry.path).unwrap()), "new\n");
     }
@@ -1042,29 +1123,31 @@ pub mod tests {
     fn added_and_deleted_hunks_and_binary_whole_files_round_trip() {
         let (dir, repo) = repo();
         fs::write(dir.path().join("file.txt"), "new text").unwrap();
-        let (entry, view) = selected_view(&repo, Mode::Working);
-        repo.toggle_hunk(&entry, &Mode::Working, &view.patches[0])
+        let (entry, view) = selected_view(&repo, false);
+        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[0])
             .unwrap();
-        let (entry, view) = selected_view(&repo, Mode::Staged);
-        repo.toggle_hunk(&entry, &Mode::Staged, &view.patches[0])
+        let (entry, view) = selected_view(&repo, true);
+        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[0])
             .unwrap();
-        assert!(repo.files(Mode::Staged).unwrap().is_empty());
-        repo.toggle_file(&entry, &Mode::Working).unwrap();
+        assert!(repo.staged_files().unwrap().is_empty());
+        let (entry, _) = selected_view(&repo, false);
+        repo.toggle_file(&entry, &Mode::Changes).unwrap();
         repo.run_operation(&Operation::Commit("Add file".into()))
             .unwrap();
         fs::remove_file(dir.path().join("file.txt")).unwrap();
-        let (entry, view) = selected_view(&repo, Mode::Working);
-        repo.toggle_hunk(&entry, &Mode::Working, &view.patches[0])
+        let (entry, view) = selected_view(&repo, false);
+        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[0])
             .unwrap();
-        let (entry, view) = selected_view(&repo, Mode::Staged);
-        repo.toggle_hunk(&entry, &Mode::Staged, &view.patches[0])
+        let (entry, view) = selected_view(&repo, true);
+        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[0])
             .unwrap();
         assert!(!dir.path().join("file.txt").exists());
-        assert!(repo.files(Mode::Staged).unwrap().is_empty());
+        assert!(repo.staged_files().unwrap().is_empty());
         fs::write(dir.path().join("file.txt"), [0, 1, 2]).unwrap();
-        let entry = repo.files(Mode::Working).unwrap().remove(0);
-        repo.toggle_file(&entry, &Mode::Working).unwrap();
-        repo.toggle_file(&entry, &Mode::Staged).unwrap();
+        let entry = repo.files(Mode::Changes).unwrap().remove(0);
+        repo.toggle_file(&entry, &Mode::Changes).unwrap();
+        let entry = repo.staged_files().unwrap().remove(0);
+        repo.toggle_file(&entry, &Mode::Changes).unwrap();
         assert_eq!(fs::read(dir.path().join("file.txt")).unwrap(), [0, 1, 2]);
     }
 
@@ -1084,8 +1167,8 @@ pub mod tests {
         );
         let log = repo.output(&["log", "-1", "--format=%B"]).unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).trim_end(), message);
-        assert!(repo.files(Mode::Staged).unwrap().is_empty());
-        assert_eq!(repo.files(Mode::Working).unwrap().len(), 2);
+        assert!(repo.staged_files().unwrap().is_empty());
+        assert_eq!(repo.files(Mode::Changes).unwrap().len(), 2);
         assert!(
             repo.run_operation(&Operation::Commit("  \n".into()))
                 .is_err()
