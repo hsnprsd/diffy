@@ -82,7 +82,6 @@ pub struct App {
     pub branch: String,
     pub base_branch: Option<String>,
     pub branch_picker: Option<BranchPicker>,
-    pub watching: bool,
     pub files: Vec<FileEntry>,
     pub visible: Vec<usize>,
     pub list_state: ListState,
@@ -100,7 +99,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(repo: Repository, watching: bool, base_branch: Option<String>) -> Result<Self> {
+    pub fn new(repo: Repository, base_branch: Option<String>) -> Result<Self> {
         let branch = repo.branch()?;
         let mode = match &base_branch {
             Some(target) => repo.compare_branch(target)?,
@@ -113,7 +112,6 @@ impl App {
             branch,
             files,
             visible,
-            watching,
             mode,
             base_branch,
             branch_picker: None,
@@ -466,7 +464,7 @@ mod tests {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         std::fs::write(dir.path().join("b.py"), "print(1)\n").unwrap();
-        let mut app = App::new(repo, false, None).unwrap();
+        let mut app = App::new(repo, None).unwrap();
         app.handle_key(key('n'));
         assert_eq!(app.selected().unwrap().path, PathBuf::from("b.py"));
         std::fs::write(dir.path().join("0.txt"), "new file").unwrap();
@@ -488,7 +486,7 @@ mod tests {
     #[test]
     fn branch_picker_validates_cancels_and_applies_without_changing_checkout() {
         let (_dir, repo) = diverged_repo();
-        let mut app = App::new(repo, false, None).unwrap();
+        let mut app = App::new(repo, None).unwrap();
         app.handle_key(key('b'));
         for ch in "missing".chars() {
             app.handle_key(key(ch));
@@ -531,7 +529,7 @@ mod tests {
     #[test]
     fn branch_picker_selects_without_typing_and_remembers_the_base() {
         let (_dir, repo) = diverged_repo();
-        let mut app = App::new(repo, false, None).unwrap();
+        let mut app = App::new(repo, None).unwrap();
         app.handle_key(key('b'));
         let picker = app.branch_picker.as_ref().unwrap();
         assert_eq!(picker.input, "");
@@ -566,7 +564,7 @@ mod tests {
             dir.path(),
             &["update-ref", "refs/remotes/origin/main", "main"],
         );
-        let mut app = App::new(repo, false, None).unwrap();
+        let mut app = App::new(repo, None).unwrap();
         app.handle_key(key('b'));
         for ch in "ORIGIN/MA".chars() {
             app.handle_key(key(ch));
@@ -615,7 +613,7 @@ mod tests {
     fn branch_picker_keeps_manual_refs_and_failed_selections_safe() {
         let (dir, repo) = diverged_repo();
         git(dir.path(), &["tag", "v1", "main"]);
-        let mut app = App::new(repo, false, None).unwrap();
+        let mut app = App::new(repo, None).unwrap();
         app.handle_key(key('b'));
         for ch in "v1".chars() {
             app.handle_key(key(ch));
@@ -639,7 +637,7 @@ mod tests {
     #[test]
     fn empty_branch_picker_is_safe_and_reports_an_empty_ref() {
         let (_dir, repo) = repo();
-        let mut app = App::new(repo, false, None).unwrap();
+        let mut app = App::new(repo, None).unwrap();
         app.handle_key(key('b'));
         for code in [
             KeyCode::Up,
@@ -668,7 +666,7 @@ mod tests {
     #[test]
     fn branch_refresh_tracks_commits_and_base_changes_and_retains_failed_snapshot() {
         let (dir, repo) = diverged_repo();
-        let mut app = App::new(repo, true, Some("main".into())).unwrap();
+        let mut app = App::new(repo, Some("main".into())).unwrap();
         std::fs::write(dir.path().join("later.rs"), "fn later() {}\n").unwrap();
         app.refresh();
         assert_eq!(app.files.len(), 3); // Untracked files must not leak into the branch view.
@@ -701,7 +699,7 @@ mod tests {
     #[test]
     fn failed_mode_switch_keeps_the_previous_mode() {
         let (dir, repo) = diverged_repo();
-        let mut app = App::new(repo, false, Some("main".into())).unwrap();
+        let mut app = App::new(repo, Some("main".into())).unwrap();
         app.handle_key(key('s'));
         app.handle_key(key('s'));
         assert_eq!(app.mode, Mode::Staged);
@@ -714,7 +712,7 @@ mod tests {
     #[test]
     fn branch_input_does_not_interpret_shortcuts() {
         let (_dir, repo) = diverged_repo();
-        let mut app = App::new(repo, false, None).unwrap();
+        let mut app = App::new(repo, None).unwrap();
         app.handle_key(key('b'));
         for ch in "qs?j/k".chars() {
             assert!(!app.handle_key(key(ch)));
@@ -731,7 +729,7 @@ mod tests {
     #[test]
     fn empty_repository_and_help_are_safe() {
         let (_dir, repo) = repo();
-        let mut app = App::new(repo, false, None).unwrap();
+        let mut app = App::new(repo, None).unwrap();
         for ch in ['n', 'p', 'G', 'g', '[', ']', 'l', 'h', 's', 'r'] {
             assert!(!app.handle_key(key(ch)));
         }

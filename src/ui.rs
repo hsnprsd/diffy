@@ -47,7 +47,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .file_name()
         .unwrap_or_default()
         .to_string_lossy();
-    let live = if app.watching { "LIVE" } else { "MANUAL" };
     let header = Line::from(vec![
         Span::styled(" diffy ", Style::default().fg(BG).bg(ACCENT).bold()),
         Span::styled(
@@ -57,10 +56,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Span::styled(
             format!("  /  {}", safe_text(&app.branch)),
             Style::default().fg(MUTED),
-        ),
-        Span::styled(
-            format!("   ● {live}"),
-            Style::default().fg(if app.watching { GREEN } else { MUTED }),
         ),
     ]);
     frame.render_widget(Paragraph::new(header), chunks[0]);
@@ -491,7 +486,7 @@ mod tests {
             dir.path(),
             &["update-ref", "refs/remotes/origin/main", "main"],
         );
-        let mut app = App::new(repo, true, Some("main".into())).unwrap();
+        let mut app = App::new(repo, Some("main".into())).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(screen(&terminal).contains("Branch main...HEAD"));
@@ -526,7 +521,7 @@ mod tests {
         for index in 0..30 {
             git(dir.path(), &["branch", &format!("topic/{index:02}")]);
         }
-        let mut app = App::new(repo, false, None).unwrap();
+        let mut app = App::new(repo, None).unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
         for (width, height) in [(80, 24), (40, 12)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -543,7 +538,7 @@ mod tests {
     fn renders_diff_and_help_at_different_sizes() {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let mut app = App::new(repo, true, None).unwrap();
+        let mut app = App::new(repo, None).unwrap();
         for (width, height) in [(120, 30), (80, 24), (40, 12), (10, 4), (1, 1)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             for focus in [Focus::Files, Focus::Diff] {
@@ -566,5 +561,7 @@ mod tests {
         assert!(text.contains("main.rs"));
         assert!(text.contains("fn main()"));
         assert!(text.contains("Rust"));
+        assert!(!text.contains("● LIVE"));
+        assert!(!text.contains("● MANUAL"));
     }
 }

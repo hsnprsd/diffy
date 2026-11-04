@@ -79,7 +79,7 @@ fn main() -> Result<()> {
     } else {
         Some(Watcher::new(&repo).context("Could not watch repository; try --no-watch")?)
     };
-    let mut app = App::new(repo, watcher.is_some(), base_branch)?;
+    let mut app = App::new(repo, base_branch)?;
 
     // Ratatui's panic hook and this guard both restore the terminal on exit.
     let _restore = RestoreTerminal;
@@ -94,7 +94,6 @@ fn main() -> Result<()> {
             }
             Err(error) => {
                 app.error = Some(format!("Watcher: {error}; r refreshes manually"));
-                app.watching = false;
                 watcher = None;
                 dirty = true;
             }
