@@ -31,6 +31,8 @@ pub struct DiffRow {
 pub struct DiffView {
     pub rows: Vec<DiffRow>,
     pub hunks: Vec<usize>,
+    pub patches: Vec<String>,
+    pub source: Option<(String, String)>,
     pub additions: usize,
     pub deletions: usize,
     pub language: Option<Language>,
@@ -89,21 +91,32 @@ impl DiffView {
                     range.start + 1
                 }
             };
+            let header = format!(
+                "@@ -{},{} +{},{} @@\n",
+                start(&old_range),
+                old_range.len(),
+                start(&new_range),
+                new_range.len()
+            );
+            let mut patch = header.clone();
             view.hunks.push(view.rows.len());
             view.rows.push(DiffRow {
                 kind: RowKind::Hunk,
                 old_line: None,
                 new_line: None,
-                spans: vec![Span::raw(format!(
-                    "@@ -{},{} +{},{} @@",
-                    start(&old_range),
-                    old_range.len(),
-                    start(&new_range),
-                    new_range.len()
-                ))],
+                spans: vec![Span::raw(header.trim_end().to_owned())],
             });
             for op in group {
                 for change in diff.iter_changes(&op) {
+                    patch.push(match change.tag() {
+                        ChangeTag::Equal => ' ',
+                        ChangeTag::Delete => '-',
+                        ChangeTag::Insert => '+',
+                    });
+                    patch.push_str(change.value());
+                    if change.missing_newline() {
+                        patch.push_str("\n\\ No newline at end of file\n");
+                    }
                     let (kind, spans) = match change.tag() {
                         ChangeTag::Equal => {
                             (RowKind::Context, &new_lines[change.new_index().unwrap()])
@@ -129,7 +142,9 @@ impl DiffView {
                     }
                 }
             }
+            view.patches.push(patch);
         }
+        view.source = Some((old, new));
         Ok(view)
     }
 }

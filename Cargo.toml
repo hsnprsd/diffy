@@ -2,7 +2,7 @@
 name = "diffy"
 version = "0.1.0"
 edition = "2024"
-description = "A live, Tree-sitter highlighted Git diff viewer for the terminal"
+description = "A live Git diff and staging interface with Tree-sitter highlighting for the terminal"
 
 [dependencies]
 anyhow = "1"

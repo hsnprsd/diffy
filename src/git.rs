@@ -2,9 +2,9 @@ use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
@@ -66,7 +66,23 @@ impl Content {
     }
 }
 
-#[derive(Debug)]
+pub enum Operation {
+    Commit(String),
+    Pull,
+    Push,
+}
+
+impl Operation {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Commit(_) => "Committing",
+            Self::Pull => "Pulling",
+            Self::Push => "Pushing",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Repository {
     pub root: PathBuf,
     pub git_dir: PathBuf,
@@ -265,6 +281,127 @@ impl Repository {
         Ok((old, new))
     }
 
+    pub fn toggle_file(&self, entry: &FileEntry, mode: &Mode) -> Result<()> {
+        let mut cmd = command(&self.root);
+        match mode {
+            Mode::Working => cmd.args(["add", "-A"]),
+            // Reset also works on unborn branches and never changes files on disk.
+            Mode::Staged => cmd.args(["reset", "-q"]),
+            Mode::Branch { .. } => {
+                bail!("Switch to Working tree or Staged to stage/unstage changes")
+            }
+        };
+        let output = cmd.arg("--").arg(&entry.path).output()?;
+        ensure_success(&output)
+    }
+
+    pub fn toggle_hunk(&self, entry: &FileEntry, mode: &Mode, hunk: &str) -> Result<()> {
+        anyhow::ensure!(!mode.is_branch(), "Branch comparisons are read-only");
+        anyhow::ensure!(
+            entry.status != 'U' && !entry.submodule,
+            "Use the Files pane to stage/unstage conflicts or submodules as a whole"
+        );
+        // Added/deleted files contain exactly one hunk, covering their entire contents.
+        if matches!(entry.status, 'A' | '?' | 'D') {
+            return self.toggle_file(entry, mode);
+        }
+        let patch = format!(
+            "--- {}\n+++ {}\n{hunk}",
+            patch_path("a/", &entry.path),
+            patch_path("b/", &entry.path),
+        );
+        let mut cmd = command(&self.root);
+        cmd.args(["apply", "--cached", "--whitespace=nowarn"]);
+        if *mode == Mode::Staged {
+            cmd.arg("--reverse");
+        }
+        let output = with_input(cmd, patch.as_bytes())?;
+        ensure_success(&output)
+    }
+
+    pub fn run_operation(&self, operation: &Operation) -> Result<String> {
+        let mut cmd = command(&self.root);
+        // Capture command output and disable Git's terminal prompts. Authentication
+        // and signing can still use configured agents or askpass programs.
+        cmd.env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_EDITOR", "true")
+            .env("GIT_SEQUENCE_EDITOR", "true");
+        let output = match operation {
+            Operation::Commit(message) => {
+                anyhow::ensure!(!message.trim().is_empty(), "Enter a commit message");
+                cmd.args(["commit", "--cleanup=whitespace", "-F", "-"]);
+                with_input(cmd, message.as_bytes())?
+            }
+            Operation::Pull | Operation::Push => {
+                let output = self.output(&["symbolic-ref", "--quiet", "HEAD"])?;
+                anyhow::ensure!(output.status.success(), "Cannot pull/push a detached HEAD");
+                let branch_ref = std::str::from_utf8(trim_newline(&output.stdout))?;
+                let branch = branch_ref
+                    .strip_prefix("refs/heads/")
+                    .context("HEAD must point to a local branch")?;
+                if matches!(operation, Operation::Pull) {
+                    cmd.args(["pull", "--ff-only", "--no-rebase"]);
+                } else {
+                    let config = |key: &str| -> Result<Option<String>> {
+                        let output = self.output(&["config", "--get", key])?;
+                        if output.status.code() == Some(1) {
+                            return Ok(None);
+                        }
+                        ensure_success(&output)?;
+                        Ok(Some(
+                            std::str::from_utf8(trim_newline(&output.stdout))?.to_owned(),
+                        ))
+                    };
+                    let upstream_remote = config(&format!("branch.{branch}.remote"))?;
+                    let remote = config(&format!("branch.{branch}.pushRemote"))?
+                        .or(config("remote.pushDefault")?)
+                        .or_else(|| upstream_remote.clone());
+                    let remote = match remote {
+                        Some(remote) => remote,
+                        None => {
+                            let output = self.output(&["remote"])?;
+                            ensure_success(&output)?;
+                            let remotes = std::str::from_utf8(&output.stdout)?;
+                            let remotes: Vec<_> = remotes.lines().collect();
+                            if remotes.contains(&"origin") {
+                                "origin".to_owned()
+                            } else {
+                                anyhow::ensure!(
+                                    remotes.len() == 1,
+                                    "Configure a push remote for this branch"
+                                );
+                                remotes[0].to_owned()
+                            }
+                        }
+                    };
+                    let target = if upstream_remote.as_deref() == Some(&remote) {
+                        config(&format!("branch.{branch}.merge"))?
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| format!("refs/heads/{branch}"));
+                    cmd.arg("push");
+                    if upstream_remote.is_none() {
+                        cmd.arg("--set-upstream");
+                    }
+                    // An explicit refspec prevents push.default=matching or remote.push
+                    // from accidentally pushing branches other than the current one.
+                    cmd.arg("--")
+                        .arg(remote)
+                        .arg(format!("{branch_ref}:{target}"));
+                }
+                cmd.output()?
+            }
+        };
+        ensure_success(&output)?;
+        let message = [&output.stdout[..], &output.stderr[..]]
+            .into_iter()
+            .map(|bytes| String::from_utf8_lossy(bytes))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(message.trim().to_owned())
+    }
+
     fn blob(&self, prefix: &str, path: &Path) -> Result<Content> {
         let mut object = OsString::from(prefix);
         object.push(path.as_os_str());
@@ -345,13 +482,53 @@ fn command(dir: &Path) -> Command {
     command
         .current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .stdin(Stdio::null())
         .args(["--no-pager", "-c", "color.ui=false"]);
     command
 }
 
+fn with_input(mut command: Command, input: &[u8]) -> Result<Output> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Could not run Git")?;
+    let write = child.stdin.take().unwrap().write_all(input);
+    let output = child.wait_with_output()?;
+    // Prefer Git's error over a broken pipe when it rejected the input early.
+    if output.status.success() {
+        write.context("Could not send input to Git")?;
+    }
+    Ok(output)
+}
+
+// Git's quoted path syntax preserves arbitrary bytes, including tabs and newlines.
+fn patch_path(prefix: &str, path: &Path) -> String {
+    let mut quoted = format!("\"{prefix}");
+    for byte in os_to_bytes(path.as_os_str()) {
+        match byte {
+            b'"' => quoted.push_str("\\\""),
+            b'\\' => quoted.push_str("\\\\"),
+            0x20..=0x7e => quoted.push(byte as char),
+            _ => quoted.push_str(&format!("\\{byte:03o}")),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 fn ensure_success(output: &Output) -> Result<()> {
     if !output.status.success() {
-        bail!("Git: {}", String::from_utf8_lossy(&output.stderr).trim());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let message = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        bail!("Git: {message}");
     }
     Ok(())
 }
@@ -750,6 +927,245 @@ pub mod tests {
         git(dir.path(), &["commit", "-qm", "Unrelated"]);
         let error = format!("{:#}", repo.compare_branch("main").unwrap_err());
         assert!(error.contains("No common ancestor"));
+    }
+
+    fn selected_view(repo: &Repository, mode: Mode) -> (FileEntry, crate::diff::DiffView) {
+        let entry = repo.files(mode.clone()).unwrap().remove(0);
+        let (old, new) = repo.contents(&entry, mode).unwrap();
+        let view = crate::diff::DiffView::build(
+            &entry.path,
+            old,
+            new,
+            &mut crate::highlight::SyntaxHighlighter::default(),
+        )
+        .unwrap();
+        (entry, view)
+    }
+
+    pub fn connected_repo() -> (TempDir, TempDir, Repository) {
+        let (dir, repo) = repo();
+        git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        repo.run_operation(&Operation::Push).unwrap();
+        (dir, remote, repo)
+    }
+
+    #[test]
+    fn whole_file_staging_is_literal_and_unstaging_preserves_unborn_worktree() {
+        let (dir, repo) = repo();
+        let path = ":(glob)*.txt";
+        fs::write(dir.path().join(path), "selected\n").unwrap();
+        fs::write(dir.path().join("other.txt"), "not selected\n").unwrap();
+        let entry = repo.files(Mode::Working).unwrap().remove(0);
+        assert_eq!(entry.path, Path::new(path));
+        repo.toggle_file(&entry, &Mode::Working).unwrap();
+        let staged = repo.files(Mode::Staged).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].path, entry.path);
+        fs::write(dir.path().join(path), "later edits\n").unwrap();
+        repo.toggle_file(&staged[0], &Mode::Staged).unwrap();
+        assert!(repo.files(Mode::Staged).unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(dir.path().join(path)).unwrap(),
+            "later edits\n"
+        );
+        assert!(
+            repo.toggle_file(
+                &entry,
+                &Mode::Branch {
+                    merge_base: String::new(),
+                    head: String::new()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn hunk_staging_round_trips_quoted_paths_and_missing_newlines() {
+        let (dir, repo) = repo();
+        let path = dir.path().join("a \"quoted\"\n界.txt");
+        let old: String = (1..=40).map(|n| format!("line {n}\r\n")).collect();
+        fs::write(&path, &old).unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "Initial"]);
+        let new = old
+            .replace("line 2\r\n", "first\r\nextra\r\n")
+            .replace("line 39\r\nline 40\r\n", "last");
+        fs::write(&path, &new).unwrap();
+        let (entry, view) = selected_view(&repo, Mode::Working);
+        assert_eq!(view.hunks.len(), 2);
+        repo.toggle_hunk(&entry, &Mode::Working, &view.patches[1])
+            .unwrap();
+        assert_eq!(
+            text(repo.blob(":", &entry.path).unwrap()),
+            old.replace("line 39\r\nline 40\r\n", "last")
+        );
+        let (entry, staged) = selected_view(&repo, Mode::Staged);
+        repo.toggle_hunk(&entry, &Mode::Staged, &staged.patches[0])
+            .unwrap();
+        assert!(repo.files(Mode::Staged).unwrap().is_empty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), new);
+        // Stage everything, then unstage only the first hunk; the second stays staged.
+        repo.toggle_file(&entry, &Mode::Working).unwrap();
+        let (entry, staged) = selected_view(&repo, Mode::Staged);
+        repo.toggle_hunk(&entry, &Mode::Staged, &staged.patches[0])
+            .unwrap();
+        assert_eq!(
+            text(repo.blob(":", &entry.path).unwrap()),
+            old.replace("line 39\r\nline 40\r\n", "last")
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), new);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hunks_support_non_utf8_paths() {
+        let (dir, repo) = repo();
+        let name = os_from_bytes(b"invalid-\xff.txt");
+        fs::write(dir.path().join(&name), "old\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "Initial"]);
+        fs::write(dir.path().join(&name), "new\n").unwrap();
+        let (entry, view) = selected_view(&repo, Mode::Working);
+        repo.toggle_hunk(&entry, &Mode::Working, &view.patches[0])
+            .unwrap();
+        assert_eq!(text(repo.blob(":", &entry.path).unwrap()), "new\n");
+    }
+
+    #[test]
+    fn added_and_deleted_hunks_and_binary_whole_files_round_trip() {
+        let (dir, repo) = repo();
+        fs::write(dir.path().join("file.txt"), "new text").unwrap();
+        let (entry, view) = selected_view(&repo, Mode::Working);
+        repo.toggle_hunk(&entry, &Mode::Working, &view.patches[0])
+            .unwrap();
+        let (entry, view) = selected_view(&repo, Mode::Staged);
+        repo.toggle_hunk(&entry, &Mode::Staged, &view.patches[0])
+            .unwrap();
+        assert!(repo.files(Mode::Staged).unwrap().is_empty());
+        repo.toggle_file(&entry, &Mode::Working).unwrap();
+        repo.run_operation(&Operation::Commit("Add file".into()))
+            .unwrap();
+        fs::remove_file(dir.path().join("file.txt")).unwrap();
+        let (entry, view) = selected_view(&repo, Mode::Working);
+        repo.toggle_hunk(&entry, &Mode::Working, &view.patches[0])
+            .unwrap();
+        let (entry, view) = selected_view(&repo, Mode::Staged);
+        repo.toggle_hunk(&entry, &Mode::Staged, &view.patches[0])
+            .unwrap();
+        assert!(!dir.path().join("file.txt").exists());
+        assert!(repo.files(Mode::Staged).unwrap().is_empty());
+        fs::write(dir.path().join("file.txt"), [0, 1, 2]).unwrap();
+        let entry = repo.files(Mode::Working).unwrap().remove(0);
+        repo.toggle_file(&entry, &Mode::Working).unwrap();
+        repo.toggle_file(&entry, &Mode::Staged).unwrap();
+        assert_eq!(fs::read(dir.path().join("file.txt")).unwrap(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn commits_only_the_index_and_preserves_multiline_messages() {
+        let (dir, repo) = repo();
+        fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        fs::write(dir.path().join("file.txt"), "unstaged\n").unwrap();
+        fs::write(dir.path().join("untracked.txt"), "untracked\n").unwrap();
+        let message = "Commit staged content\n\nA Unicode body: 界\n# Kept as message text";
+        repo.run_operation(&Operation::Commit(message.into()))
+            .unwrap();
+        assert_eq!(
+            text(repo.blob("HEAD:", Path::new("file.txt")).unwrap()),
+            "staged\n"
+        );
+        let log = repo.output(&["log", "-1", "--format=%B"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim_end(), message);
+        assert!(repo.files(Mode::Staged).unwrap().is_empty());
+        assert_eq!(repo.files(Mode::Working).unwrap().len(), 2);
+        assert!(
+            repo.run_operation(&Operation::Commit("  \n".into()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn push_sets_upstream_and_ignores_matching_or_custom_push_refspecs() {
+        let (dir, remote, repo) = connected_repo();
+        assert_eq!(
+            repo.output(&["config", "--get", "branch.main.remote"])
+                .unwrap()
+                .stdout,
+            b"origin\n"
+        );
+        git(dir.path(), &["branch", "other"]);
+        git(dir.path(), &["tag", "main"]); // Ambiguous short refs must not affect the source branch.
+        git(dir.path(), &["config", "push.default", "matching"]);
+        git(
+            dir.path(),
+            &[
+                "config",
+                "remote.origin.push",
+                "refs/heads/other:refs/heads/other",
+            ],
+        );
+        git(dir.path(), &["commit", "--allow-empty", "-qm", "Later"]);
+        repo.run_operation(&Operation::Push).unwrap();
+        let remote_main = command(remote.path())
+            .args(["rev-parse", "refs/heads/main"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            remote_main.stdout,
+            repo.output(&["rev-parse", "HEAD"]).unwrap().stdout
+        );
+        let other = command(remote.path())
+            .args(["show-ref", "--verify", "refs/heads/other"])
+            .output()
+            .unwrap();
+        assert!(!other.status.success());
+    }
+
+    #[test]
+    fn pull_fast_forwards_current_branch_and_refuses_divergence() {
+        let (dir, remote, repo) = connected_repo();
+        let (peer, peer_repo) = self::repo();
+        git(
+            peer.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(peer.path(), &["fetch", "origin"]);
+        git(peer.path(), &["reset", "--hard", "origin/main"]);
+        git(peer.path(), &["branch", "--set-upstream-to", "origin/main"]);
+        fs::write(peer.path().join("upstream.txt"), "upstream\n").unwrap();
+        git(peer.path(), &["add", "."]);
+        git(peer.path(), &["commit", "-qm", "Upstream"]);
+        peer_repo.run_operation(&Operation::Push).unwrap();
+        repo.run_operation(&Operation::Pull).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("upstream.txt")).unwrap(),
+            "upstream\n"
+        );
+        git(dir.path(), &["commit", "--allow-empty", "-qm", "Local"]);
+        let head = repo.output(&["rev-parse", "HEAD"]).unwrap().stdout;
+        git(peer.path(), &["commit", "--allow-empty", "-qm", "Remote"]);
+        peer_repo.run_operation(&Operation::Push).unwrap();
+        assert!(repo.run_operation(&Operation::Pull).is_err());
+        assert_eq!(repo.output(&["rev-parse", "HEAD"]).unwrap().stdout, head);
+        assert!(!repo.git_dir.join("MERGE_HEAD").exists());
+        assert!(repo.run_operation(&Operation::Push).is_err());
+        git(dir.path(), &["checkout", "--detach", "-q"]);
+        for operation in [Operation::Pull, Operation::Push] {
+            assert!(
+                repo.run_operation(&operation)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("detached HEAD")
+            );
+        }
     }
 
     #[test]

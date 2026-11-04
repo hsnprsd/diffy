@@ -15,7 +15,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use crossterm::{
-    event::{self, Event, KeyEventKind},
+    event::{self, EnableBracketedPaste, Event, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, enable_raw_mode},
 };
@@ -36,8 +36,10 @@ fn main() -> Result<()> {
                  --base, -b REF Compare merge-base(REF, HEAD) to HEAD (committed only)\n\n\
                  Updates automatically when repository files or refs change.\n\
                  Keys: ←/→/Tab focus · ↑/↓/j/k move · s cycle views\n\
+                       Space stage/unstage file or hunk · c commit · p pull · P push\n\
                        e edit in $EDITOR · b select base branch · [/] hunks · ? help · q quit\n\n\
-                 Never stages or discards changes. Editing opens the working-tree file."
+                 Commit popup: Ctrl+S commit · Enter newline · Esc cancel.\n\
+                 Pull is fast-forward only. Staging/unstaging never changes working-tree files."
             );
             return Ok(());
         } else if !positional && (arg == "--version" || arg == "-V") {
@@ -82,8 +84,10 @@ fn main() -> Result<()> {
     // Ratatui's panic hook and this guard both restore the terminal on exit.
     let _restore = RestoreTerminal;
     let mut terminal = ratatui::try_init().context("Could not initialize terminal")?;
+    execute!(io::stdout(), EnableBracketedPaste)?;
     let mut dirty = true;
     loop {
+        dirty |= app.poll_operation();
         if watcher.poll().context("Filesystem watcher failed")? {
             app.refresh();
             dirty = true;
@@ -101,6 +105,10 @@ fn main() -> Result<()> {
                     if let Some(request) = app.edit_request.take() {
                         edit_file(request, &mut app, &mut terminal)?;
                     }
+                    dirty = true;
+                }
+                Event::Paste(text) => {
+                    app.handle_paste(&text);
                     dirty = true;
                 }
                 Event::Resize(_, _) => dirty = true,
@@ -123,6 +131,7 @@ fn edit_file(
             return Ok(());
         }
     };
+    execute!(io::stdout(), event::DisableBracketedPaste)?;
     ratatui::try_restore().context("Could not suspend terminal")?;
     let result = command
         .status()
@@ -136,7 +145,7 @@ fn edit_file(
     // Resume even when launching the editor failed. Reuse the terminal and invalidate
     // its buffers so editor output and any resize are replaced by a complete redraw.
     enable_raw_mode().context("Could not resume terminal")?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
     terminal.clear()?;
     app.refresh();
     if let Err(error) = result {
@@ -149,6 +158,7 @@ struct RestoreTerminal;
 
 impl Drop for RestoreTerminal {
     fn drop(&mut self) {
+        let _ = execute!(io::stdout(), event::DisableBracketedPaste);
         ratatui::restore();
         // Ensure an error printed by main starts on its own line.
         let _ = io::Write::flush(&mut io::stdout());

@@ -11,7 +11,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, BranchPicker, Focus},
+    app::{App, BranchPicker, CommitPopup, Focus, Status},
     diff::{DiffRow, RowKind},
     git::{Mode, safe_text},
     highlight::TEXT,
@@ -105,9 +105,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     let footer = if let Some(error) = &app.error {
         Line::styled(format!(" {}", safe_text(error)), Style::default().fg(RED))
+    } else if let Some(label) = app.operation_label() {
+        Line::styled(format!(" {label}…"), Style::default().fg(ACCENT))
+    } else if let Some(status) = &app.status {
+        Line::styled(
+            format!(" {}", safe_text(status.message())),
+            Style::default().fg(if matches!(status, Status::Error(_)) {
+                RED
+            } else {
+                GREEN
+            }),
+        )
     } else {
         Line::styled(
-            " ←/→/Tab focus · ↑/↓/j/k move · e edit · [/] hunks · b branch · ? help · q quit",
+            " Space stage/unstage · c commit · p pull · P push · b base · s view · e edit · ? help · q quit",
             Style::default().fg(MUTED),
         )
     };
@@ -117,6 +128,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
     if let Some(picker) = &mut app.branch_picker {
         branch_picker(frame, area, picker);
+    }
+    if let Some(popup) = &app.commit_popup {
+        commit_popup(frame, area, popup, app.operation_label().is_some());
     }
     if app.show_help {
         help(frame, area);
@@ -132,10 +146,17 @@ fn pane(title: String, focused: bool) -> Block<'static> {
 }
 
 fn files(frame: &mut Frame, app: &mut App, area: Rect) {
-    let block = pane(
+    let mut block = pane(
         format!(" Files {} ", app.files.len()),
         app.focus == Focus::Files,
     );
+    if !app.mode.is_branch() {
+        block = block.title_bottom(if app.mode == Mode::Working {
+            " Space stage file "
+        } else {
+            " Space unstage file "
+        });
+    }
     let inner = block.inner(area);
     let items: Vec<ListItem> = app
         .files
@@ -171,8 +192,16 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|entry| safe_text(&entry.path.to_string_lossy()))
         .unwrap_or_else(|| app.mode.label().into());
     let language = app.view.language.map_or("Text", |language| language.name());
-    let summary = Line::from(vec![
-        Span::raw(format!(" {language} · {} hunks  ", app.view.hunks.len())),
+    let mut summary = Line::from(vec![
+        Span::raw(format!(
+            " {language} · hunk {}/{}  ",
+            if app.view.hunks.is_empty() {
+                0
+            } else {
+                app.active_hunk() + 1
+            },
+            app.view.hunks.len()
+        )),
         Span::styled(
             format!("+{}", app.view.additions),
             Style::default().fg(GREEN),
@@ -183,6 +212,16 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(RED),
         ),
     ]);
+    if !app.mode.is_branch() {
+        summary.spans.push(Span::styled(
+            if app.mode == Mode::Working {
+                "· Space stage hunk "
+            } else {
+                "· Space unstage hunk "
+            },
+            Style::default().fg(MUTED),
+        ));
+    }
     let block = pane(format!(" {title} "), app.focus == Focus::Diff).title_bottom(summary);
     let inner = block.inner(area);
     app.viewport_height = inner.height as usize;
@@ -362,9 +401,75 @@ fn branch_picker(frame: &mut Frame, area: Rect, picker: &mut BranchPicker) {
     }
 }
 
+fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool) {
+    let width = area.width.saturating_sub(4).min(80);
+    let height = area.height.saturating_sub(2).min(18);
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let block = pane(" Commit staged changes ".into(), true);
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    let chunks = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    let before = &popup.message[..popup.cursor];
+    let row = before.bytes().filter(|&byte| byte == b'\n').count();
+    let column = safe_text(before.rsplit('\n').next().unwrap_or("")).width();
+    let top = row.saturating_sub(chunks[0].height.saturating_sub(1) as usize);
+    let left = column.saturating_sub(chunks[0].width.saturating_sub(1) as usize);
+    let lines: Vec<Line> = popup
+        .message
+        .split('\n')
+        .skip(top)
+        .take(chunks[0].height as usize)
+        .map(|line| {
+            Line::from(clip_spans(
+                &[Span::raw(safe_text(line))],
+                left,
+                chunks[0].width as usize,
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(if busy {
+            "Committing… please wait"
+        } else {
+            "Ctrl+S commit · Enter newline · Esc cancel · Ctrl+U clear"
+        })
+        .style(Style::default().fg(ACCENT)),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new(
+            popup
+                .error
+                .as_deref()
+                .map(safe_text)
+                .unwrap_or_else(|| "Only staged changes will be committed".into()),
+        )
+        .style(Style::default().fg(if popup.error.is_some() { RED } else { MUTED })),
+        chunks[2],
+    );
+    if !busy && chunks[0].width > 0 && chunks[0].height > 0 {
+        frame.set_cursor_position((
+            chunks[0].x + column.saturating_sub(left) as u16,
+            chunks[0].y + row.saturating_sub(top) as u16,
+        ));
+    }
+}
+
 fn help(frame: &mut Frame, area: Rect) {
     let width = area.width.saturating_sub(4).min(70);
-    let height = area.height.saturating_sub(2).min(26);
+    let height = area.height.saturating_sub(2).min(30);
     let popup = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
@@ -380,13 +485,16 @@ fn help(frame: &mut Frame, area: Rect) {
         Line::raw("←/→ or Tab          Switch files / diff focus"),
         Line::raw("j/k or ↑/↓          Select files / scroll diff"),
         Line::raw("Enter               Focus the diff"),
+        Line::raw("Space               Stage/unstage file (Files) or hunk (Diff)"),
+        Line::raw("c                   Commit staged changes (message popup)"),
+        Line::raw("p / P               Pull (fast-forward only) / push branch"),
         Line::raw("e                   Edit in $EDITOR at first (visible) hunk"),
         Line::raw("h/l                 Scroll code horizontally"),
         Line::raw("PgUp/PgDn or u/d    Page up / down"),
         Line::raw("Home/End or g/G     First / last row or file"),
         Line::raw("[ / ]               Previous / next hunk"),
         Line::raw("s                   Cycle working tree / staged / branch"),
-        Line::raw("b                   Select a base branch (type to filter)"),
+        Line::raw("b                   Switch base branch (type to filter)"),
         Line::raw("? / F1              Show help"),
         Line::raw("q / Ctrl+C          Quit"),
         Line::raw(""),
@@ -548,6 +656,58 @@ mod tests {
             assert!(app.scroll > 0);
             app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
             assert_eq!(app.edit_request.take().unwrap().line, Some(1));
+        }
+    }
+
+    #[test]
+    fn staging_controls_and_commit_popup_are_visible() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        let mut app = App::new(repo, None).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        for hint in [
+            "Space stage file",
+            "Space stage/unstage",
+            "c commit",
+            "p pull",
+            "P push",
+            "b base",
+        ] {
+            assert!(text.contains(hint), "Missing hint: {hint}");
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("Space unstage file"));
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        app.handle_paste("Commit 界\n\nMessage body");
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Commit staged changes"));
+        assert!(text.contains("Commit 界"));
+        assert!(text.contains("Message body"));
+        assert!(text.contains("Ctrl+S commit"));
+        app.commit_popup.as_mut().unwrap().error = Some("Commit hook failed\u{1b}".into());
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("Commit hook failed\\u{1b}"));
+    }
+
+    #[test]
+    fn commit_popup_scrolls_and_renders_at_tiny_sizes() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo, None).unwrap();
+        app.commit_popup = Some(CommitPopup::default());
+        app.handle_paste(&format!("{}last row 界", "long 界 line\n".repeat(50)));
+        for (width, height) in [(120, 30), (40, 12), (10, 4), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            if height > 4 {
+                assert!(screen(&terminal).contains("last row 界"));
+                let cursor = terminal.get_cursor_position().unwrap();
+                assert!(cursor.x < width && cursor.y < height);
+            }
         }
     }
 

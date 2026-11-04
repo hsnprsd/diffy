@@ -24,6 +24,11 @@ fn help_describes_automatic_updates_and_pane_navigation() {
     assert!(help.contains("←/→/Tab focus"));
     assert!(help.contains("↑/↓/j/k move"));
     assert!(help.contains("e edit in $EDITOR"));
+    assert!(help.contains("Space stage/unstage file or hunk"));
+    assert!(help.contains("c commit · p pull · P push"));
+    assert!(help.contains("Ctrl+S commit"));
+    assert!(help.contains("Pull is fast-forward only"));
+    assert!(!help.contains("Never stages"));
     assert!(!help.contains("--no-watch"));
     assert!(!help.contains("n/p"));
     assert!(!help.contains("/ filter"));

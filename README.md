@@ -1,7 +1,7 @@
 # diffy
 
-A live Git diff viewer for the terminal, built with Rust, Ratatui,
-Tree-sitter, and native filesystem notifications.
+A live Git diff viewer and staging interface for the terminal, built with Rust,
+Ratatui, Tree-sitter, and native filesystem notifications.
 
 - **Syntax-aware unified diffs:** both revisions are parsed in full by Tree-sitter,
   preserving multiline comments and strings. Added/removed lines have distinct
@@ -20,10 +20,17 @@ Tree-sitter, and native filesystem notifications.
 - **Open in your editor:** press `e` in either pane to open the working-tree file
   in `$EDITOR`, then return to diffy when the editor exits. Opens at the first
   visible hunk in the Diff pane, or the file's first hunk in the Files pane.
-- **Safe to browse:** no staging, discarding, or index refresh writes. Files are
-  only edited through your explicitly launched editor. External diff/textconv
-  tools are disabled. Terminal controls in source and paths are escaped, and
-  symlinks are previewed without following their targets.
+- **Stage and commit:** press `Space` to stage/unstage a whole file or an individual
+  hunk, then `c` to write a commit message in a popup. Only staged changes are
+  committed; unstaged edits stay on disk.
+- **Pull and push:** `p` fast-forwards the current branch from its upstream; `P`
+  pushes only the current branch. Commands run in the background with status and
+  errors shown in the interface.
+- **Explicit writes:** browsing never modifies the index or working tree. Staging,
+  unstaging, committing, pulling, pushing, and editing require explicit shortcuts;
+  staging/unstaging never changes working-tree files. External diff/textconv tools are
+  disabled. Terminal controls in source and paths are escaped, and symlinks are
+  previewed without following their targets.
 
 ## Install
 
@@ -90,8 +97,9 @@ Both revisions are pinned for each refresh so a moving branch cannot mix a file
 list from one commit with a preview from another. Watching recomputes the
 comparison automatically when HEAD or the base ref changes. If the base ref
 disappears, the last snapshot remains visible with an error. Remote
-branches such as `origin/main` use existing local refs: diffy never checks out
-branches or fetches updates. Fetch them yourself when needed.
+branches such as `origin/main` use existing local refs: selecting a base never
+checks out a branch or fetches updates. Use `p` to pull the current branch (which
+fetches from its upstream), or fetch other remotes outside diffy when needed.
 
 ### Keyboard shortcuts
 
@@ -101,6 +109,9 @@ branches or fetches updates. Fetch them yourself when needed.
 | `Tab` / `Shift+Tab` | Switch focus between files and diff |
 | `Enter` | Focus the diff |
 | `j` / `k`, `↓` / `↑` | Select files in the Files pane; scroll in the Diff pane |
+| `Space` | Stage in Working tree / unstage in Staged: whole file in Files, first visible hunk in Diff |
+| `c` | Open the commit-message popup for staged changes |
+| `p` / `P` | Pull (fast-forward only) / push the current branch |
 | `e` | Open in `$EDITOR` at the first visible hunk (Diff pane) or first file hunk (Files pane) |
 | `h` / `l` | Scroll code horizontally |
 | `PageUp` / `PageDown`, `u` / `d` | Page up / down |
@@ -112,6 +123,48 @@ branches or fetches updates. Fetch them yourself when needed.
 | `q` / `Ctrl+C` | Quit |
 
 Below 80 columns, only the focused pane is shown; `←` / `→` or `Tab` switches panes.
+
+### Stage, unstage, and commit
+
+In **Working tree**, press **`Space`** to stage changes. In **Staged**, the same
+key unstages them. Use **`s`** to switch between these views.
+
+- In the **Files pane**, `Space` acts on the entire selected file, including
+  additions, deletions, binary files, and mode changes.
+- In the **Diff pane**, `Space` acts only on the hunk containing the top visible
+  row, even when its header is offscreen. Use **`[` / `]`** to select a hunk; the
+  diff summary shows the active hunk number. Every hunk can be brought to the top,
+  even when multiple hunks fit in the viewport.
+- Hunk staging for modified files uses exactly the displayed text. If the file or
+  index changes before the live refresh, the operation is rejected rather than
+  acting on an outdated hunk. Added/deleted files have a single hunk covering all
+  their text and use whole-file staging/unstaging.
+- Previews without text hunks, conflicts, and submodules must be staged/unstaged
+  as whole files from the Files pane. Branch comparisons are read-only.
+
+Press **`c`** to open a commit-message popup when there are staged changes. Type
+or paste a message; **`Enter`** inserts a newline, **`Ctrl+S`** commits, and
+**`Esc`** cancels. Arrow keys, Home/End, Backspace/Delete, and Unicode text are
+supported; **`Ctrl+U`** clears the message. Commit failures (including rejected
+hooks) leave the message and error in the popup so you can edit and retry.
+Commits use the current index without staging any additional working-tree edits.
+
+### Pull and push the current branch
+
+- **`p`** runs `git pull --ff-only --no-rebase` using the current branch's upstream.
+  Diverged histories are rejected without merging or rebasing.
+- **`P`** pushes an explicit refspec for the current branch only, without force.
+  The configured branch push remote, `remote.pushDefault`, and upstream remote
+  are respected, falling back to `origin` or the sole configured remote. When
+  pushing to the upstream remote, its target branch is used; otherwise the
+  current branch name is used. A first push sets the upstream if none exists.
+
+Detached HEADs cannot be pulled/pushed. Commit, pull, and push run in the
+background; navigation and live updates continue, but further Git writes,
+editor launches, and quitting wait until the operation finishes. Output and
+errors appear in the footer. Git terminal credential prompts are disabled;
+configure credentials, SSH agents, or askpass/signing helpers beforehand.
+Git hooks and configured commit signing remain enabled.
 
 ### Open a file in your editor
 
@@ -152,7 +205,8 @@ stops and horizontal scrolling accounts for wide Unicode characters.
 - Bare repositories and arbitrary two-revision ranges are not supported. Branch
   comparisons require a common ancestor; shallow clones may need more history.
 - The viewer compares raw Git blobs with disk contents; Git clean/smudge filters
-  and textconv transformations are not applied.
+  and textconv transformations are not applied to previews or partial hunk
+  staging. Whole-file staging uses `git add` and respects Git's filters.
 - Watching is recursive, including ignored directories (changes there can cause
   a harmless refresh). Large trees can hit OS watch limits. Native filesystem
   notifications are required and may be unreliable on some network filesystems.
@@ -179,4 +233,8 @@ and visible-hunk line mapping, small terminal layouts, filesystem/index/ref
 notifications, and CLI errors. Branch tests cover
 merge-base semantics, exclusion of uncommitted changes, immutable snapshots,
 remote-tracking refs, missing/unrelated history, comparison-mode navigation, and
-branch selection/filtering.
+branch selection/filtering. Staging/commit tests cover whole files, individual
+hunks, stale previews, unusual paths, CRLF/missing newlines, Unicode message
+editing, commit-hook failures/retries, and preserving unstaged edits. Push/pull
+tests use isolated local bare remotes, covering first-push tracking, explicit
+current-branch refspecs, fast-forwards, divergence, and detached HEAD errors.
