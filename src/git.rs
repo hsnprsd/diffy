@@ -115,6 +115,25 @@ impl Repository {
         ))
     }
 
+    pub fn branches(&self) -> Result<Vec<String>> {
+        let output = self.output(&[
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(refname:short)%00%(symref)",
+            "refs/heads/",
+            "refs/remotes/",
+        ])?;
+        ensure_success(&output)?;
+        let refs = std::str::from_utf8(&output.stdout).context("Branch names must be UTF-8")?;
+        Ok(refs
+            .lines()
+            .filter_map(|line| {
+                let (name, symbolic) = line.split_once('\0')?;
+                symbolic.is_empty().then(|| name.to_owned())
+            })
+            .collect())
+    }
+
     pub fn compare_branch(&self, target: &str) -> Result<Mode> {
         anyhow::ensure!(
             !target.is_empty(),
@@ -500,6 +519,7 @@ pub mod tests {
         assert_eq!(repo.root, path.canonicalize().unwrap());
         assert_ne!(repo.git_dir, repo.common_dir);
         assert_eq!(repo.branch().unwrap(), "linked");
+        assert_eq!(repo.branches().unwrap(), ["linked", "main"]);
     }
 
     #[cfg(unix)]
@@ -593,6 +613,57 @@ pub mod tests {
         assert_eq!(files[0].status, 'D');
         let (old, new) = repo.contents(&files[0], Mode::Staged).unwrap();
         assert_eq!((text(old), text(new)), ("goodbye\n".into(), "".into()));
+    }
+
+    #[test]
+    fn lists_local_and_remote_branches_without_tags_or_symbolic_aliases() {
+        let (dir, repo) = repo();
+        assert!(repo.branches().unwrap().is_empty());
+        git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
+        git(dir.path(), &["branch", "feature/界"]);
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        git(
+            dir.path(),
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        git(dir.path(), &["tag", "v1"]);
+        git(dir.path(), &["pack-refs", "--all"]);
+        assert_eq!(
+            repo.branches().unwrap(),
+            ["feature/界", "main", "origin/main"]
+        );
+        git(dir.path(), &["checkout", "--detach", "-q"]);
+        assert_eq!(
+            repo.branches().unwrap(),
+            ["feature/界", "main", "origin/main"]
+        );
+    }
+
+    #[test]
+    fn listed_branches_disambiguate_colliding_ref_names() {
+        let (dir, repo) = repo();
+        git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
+        git(dir.path(), &["tag", "main"]);
+        git(dir.path(), &["branch", "origin/main", "HEAD"]);
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        let branches = repo.branches().unwrap();
+        assert_eq!(
+            branches,
+            ["heads/main", "heads/origin/main", "remotes/origin/main"]
+        );
+        for branch in branches {
+            assert!(repo.compare_branch(&branch).is_ok());
+        }
     }
 
     #[test]

@@ -16,13 +16,72 @@ pub enum Focus {
     Diff,
 }
 
+pub struct BranchPicker {
+    pub input: String,
+    pub branches: Vec<String>,
+    pub visible: Vec<usize>,
+    pub list_state: ListState,
+    pub error: Option<String>,
+}
+
+impl BranchPicker {
+    fn new(branches: Vec<String>, selected: Option<&str>) -> Self {
+        let position = branches
+            .iter()
+            .position(|branch| Some(branch.as_str()) == selected);
+        let mut picker = Self {
+            input: String::new(),
+            visible: (0..branches.len()).collect(),
+            branches,
+            list_state: ListState::default(),
+            error: None,
+        };
+        picker
+            .list_state
+            .select(position.or_else(|| (!picker.visible.is_empty()).then_some(0)));
+        picker
+    }
+
+    pub fn selected(&self) -> Option<&str> {
+        self.list_state
+            .selected()
+            .and_then(|selected| self.visible.get(selected))
+            .map(|&index| self.branches[index].as_str())
+    }
+
+    fn filter(&mut self) {
+        let needle = self.input.trim().to_lowercase();
+        self.visible = self
+            .branches
+            .iter()
+            .enumerate()
+            .filter(|(_, branch)| branch.to_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect();
+        self.list_state
+            .select((!self.visible.is_empty()).then_some(0));
+        self.error = None;
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        if !self.visible.is_empty() {
+            let next = self
+                .list_state
+                .selected()
+                .unwrap_or(0)
+                .saturating_add_signed(delta)
+                .min(self.visible.len() - 1);
+            self.list_state.select(Some(next));
+        }
+    }
+}
+
 pub struct App {
     pub repo: Repository,
     pub mode: Mode,
     pub branch: String,
     pub base_branch: Option<String>,
-    pub base_input: Option<String>,
-    pub base_error: Option<String>,
+    pub branch_picker: Option<BranchPicker>,
     pub watching: bool,
     pub files: Vec<FileEntry>,
     pub visible: Vec<usize>,
@@ -57,8 +116,7 @@ impl App {
             watching,
             mode,
             base_branch,
-            base_input: None,
-            base_error: None,
+            branch_picker: None,
             list_state: ListState::default(),
             view: DiffView::default(),
             focus: Focus::Files,
@@ -265,37 +323,37 @@ impl App {
             self.show_help = false;
             return false;
         }
-        if let Some(input) = &mut self.base_input {
+        if let Some(picker) = &mut self.branch_picker {
             match key.code {
-                KeyCode::Esc => {
-                    self.base_input = None;
-                    self.base_error = None;
-                }
+                KeyCode::Esc => self.branch_picker = None,
                 KeyCode::Enter => {
-                    let target = input.trim().to_owned();
+                    let target = picker.selected().unwrap_or(picker.input.trim()).to_owned();
                     match self.compare_with(&target) {
-                        Ok(()) => {
-                            self.base_input = None;
-                            self.base_error = None;
+                        Ok(()) => self.branch_picker = None,
+                        Err(error) => {
+                            self.branch_picker.as_mut().unwrap().error = Some(format!("{error:#}"));
                         }
-                        Err(error) => self.base_error = Some(format!("{error:#}")),
                     }
                 }
+                KeyCode::Down | KeyCode::Tab => picker.move_selection(1),
+                KeyCode::Up | KeyCode::BackTab => picker.move_selection(-1),
+                KeyCode::Home => picker.move_selection(-isize::MAX),
+                KeyCode::End => picker.move_selection(isize::MAX),
                 KeyCode::Backspace => {
-                    input.pop();
-                    self.base_error = None;
+                    picker.input.pop();
+                    picker.filter();
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    input.clear();
-                    self.base_error = None;
+                    picker.input.clear();
+                    picker.filter();
                 }
                 KeyCode::Char(ch)
                     if !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    input.push(ch);
-                    self.base_error = None;
+                    picker.input.push(ch);
+                    picker.filter();
                 }
                 _ => {}
             }
@@ -361,10 +419,13 @@ impl App {
                     self.error = Some(format!("Compare: {error:#}"));
                 }
             }
-            KeyCode::Char('b') => {
-                self.base_input = Some(self.base_branch.clone().unwrap_or_default());
-                self.base_error = None;
-            }
+            KeyCode::Char('b') => match self.repo.branches() {
+                Ok(branches) => {
+                    self.branch_picker =
+                        Some(BranchPicker::new(branches, self.base_branch.as_deref()));
+                }
+                Err(error) => self.error = Some(format!("Branches: {error:#}")),
+            },
             KeyCode::Char('/') => self.editing_filter = true,
             KeyCode::Esc => {
                 let selected = self.selected().map(|entry| entry.path.clone());
@@ -425,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn base_prompt_validates_cancels_and_applies_without_changing_checkout() {
+    fn branch_picker_validates_cancels_and_applies_without_changing_checkout() {
         let (_dir, repo) = diverged_repo();
         let mut app = App::new(repo, false, None).unwrap();
         app.handle_key(key('b'));
@@ -433,17 +494,24 @@ mod tests {
             app.handle_key(key(ch));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.base_error.as_ref().unwrap().contains("Cannot resolve"));
+        assert!(
+            app.branch_picker
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Cannot resolve")
+        );
         assert_eq!(app.mode, Mode::Working);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.base_input.is_none());
-        assert!(app.base_error.is_none());
+        assert!(app.branch_picker.is_none());
         app.handle_key(key('b'));
         for ch in "main".chars() {
             app.handle_key(key(ch));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.base_input.is_none());
+        assert!(app.branch_picker.is_none());
         assert!(app.mode.is_branch());
         assert_eq!(app.base_branch.as_deref(), Some("main"));
         assert_eq!(app.repo.branch().unwrap(), "feature");
@@ -458,6 +526,143 @@ mod tests {
         assert!(app.compare_with("missing").is_err());
         assert_eq!(app.mode, mode);
         assert_eq!(app.base_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn branch_picker_selects_without_typing_and_remembers_the_base() {
+        let (_dir, repo) = diverged_repo();
+        let mut app = App::new(repo, false, None).unwrap();
+        app.handle_key(key('b'));
+        let picker = app.branch_picker.as_ref().unwrap();
+        assert_eq!(picker.input, "");
+        assert_eq!(picker.selected(), Some("feature"));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.branch_picker.as_ref().unwrap().selected(), Some("main"));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.branch_picker.is_none());
+        assert!(app.mode.is_branch());
+        assert_eq!(app.base_branch.as_deref(), Some("main"));
+        assert_eq!(app.repo.branch().unwrap(), "feature");
+        assert_eq!(app.files.len(), 3);
+        app.handle_key(key('b'));
+        assert_eq!(app.branch_picker.as_ref().unwrap().selected(), Some("main"));
+        assert_eq!(app.branch_picker.as_ref().unwrap().input, "");
+        for code in [KeyCode::Up, KeyCode::Up, KeyCode::End, KeyCode::Home] {
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        assert_eq!(
+            app.branch_picker.as_ref().unwrap().selected(),
+            Some("feature")
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.base_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn branch_picker_filters_remote_and_unicode_names_and_reloads_on_open() {
+        let (dir, repo) = diverged_repo();
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/main", "main"],
+        );
+        let mut app = App::new(repo, false, None).unwrap();
+        app.handle_key(key('b'));
+        for ch in "ORIGIN/MA".chars() {
+            app.handle_key(key(ch));
+        }
+        let picker = app.branch_picker.as_ref().unwrap();
+        assert_eq!(picker.visible.len(), 1);
+        assert_eq!(picker.selected(), Some("origin/main"));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.base_branch.as_deref(), Some("origin/main"));
+        assert_eq!(app.repo.branch().unwrap(), "feature");
+        git(dir.path(), &["branch", "fix/界"]);
+        app.handle_key(key('b'));
+        assert_eq!(
+            app.branch_picker.as_ref().unwrap().selected(),
+            Some("origin/main")
+        );
+        app.handle_key(key('界'));
+        assert_eq!(
+            app.branch_picker.as_ref().unwrap().selected(),
+            Some("fix/界")
+        );
+        app.handle_key(key('x'));
+        assert!(app.branch_picker.as_ref().unwrap().visible.is_empty());
+        assert!(app.branch_picker.as_ref().unwrap().selected().is_none());
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(
+            app.branch_picker.as_ref().unwrap().selected(),
+            Some("fix/界")
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.branch_picker.as_ref().unwrap().visible.len(), 4);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.branch_picker.as_ref().unwrap().selected(),
+            Some("fix/界")
+        );
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(
+            app.branch_picker.as_ref().unwrap().selected(),
+            Some("feature")
+        );
+    }
+
+    #[test]
+    fn branch_picker_keeps_manual_refs_and_failed_selections_safe() {
+        let (dir, repo) = diverged_repo();
+        git(dir.path(), &["tag", "v1", "main"]);
+        let mut app = App::new(repo, false, None).unwrap();
+        app.handle_key(key('b'));
+        for ch in "v1".chars() {
+            app.handle_key(key(ch));
+        }
+        assert!(app.branch_picker.as_ref().unwrap().visible.is_empty());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.base_branch.as_deref(), Some("v1"));
+        let mode = app.mode.clone();
+        app.handle_key(key('b'));
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        git(dir.path(), &["branch", "-D", "main"]);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.branch_picker.as_ref().unwrap().error.is_some());
+        assert_eq!(app.mode, mode);
+        assert_eq!(app.base_branch.as_deref(), Some("v1"));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(key('b'));
+        assert_eq!(app.branch_picker.as_ref().unwrap().branches, ["feature"]);
+    }
+
+    #[test]
+    fn empty_branch_picker_is_safe_and_reports_an_empty_ref() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo, false, None).unwrap();
+        app.handle_key(key('b'));
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Enter,
+        ] {
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        let picker = app.branch_picker.as_ref().unwrap();
+        assert!(picker.visible.is_empty());
+        assert!(picker.selected().is_none());
+        assert!(
+            picker
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Enter a base branch")
+        );
+        assert_eq!(app.mode, Mode::Working);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.branch_picker.is_none());
     }
 
     #[test]
@@ -514,18 +719,13 @@ mod tests {
         for ch in "qs?j/k".chars() {
             assert!(!app.handle_key(key(ch)));
         }
-        assert_eq!(app.base_input.as_deref(), Some("qs?j/k"));
+        assert_eq!(app.branch_picker.as_ref().unwrap().input, "qs?j/k");
         assert_eq!(app.mode, Mode::Working);
         assert!(!app.show_help);
         app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        assert_eq!(app.base_input.as_deref(), Some(""));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            app.base_error
-                .as_ref()
-                .unwrap()
-                .contains("Enter a base branch")
-        );
+        assert_eq!(app.branch_picker.as_ref().unwrap().input, "");
+        assert_eq!(app.branch_picker.as_ref().unwrap().visible.len(), 2);
+        assert!(app.branch_picker.as_ref().unwrap().error.is_none());
     }
 
     #[test]

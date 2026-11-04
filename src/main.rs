@@ -32,7 +32,7 @@ fn main() -> Result<()> {
                  --no-watch     Disable filesystem watching (use r to refresh)\n\
                  --base, -b REF Compare merge-base(REF, HEAD) to HEAD (committed only)\n\n\
                  Keys: Tab focus · j/k scroll · n/p files · s cycle views\n\
-                       b base branch · [/] hunks · / filter · ? help · q quit\n\n\
+                       b select base branch · [/] hunks · / filter · ? help · q quit\n\n\
                  Read-only: never stages, discards, or changes your files."
             );
             return Ok(());

@@ -11,7 +11,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, Focus},
+    app::{App, BranchPicker, Focus},
     diff::{DiffRow, RowKind},
     git::{Mode, safe_text},
     highlight::TEXT,
@@ -141,8 +141,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let x = filter_cursor.min(chunks[1].width.saturating_sub(1) as usize);
         frame.set_cursor_position((chunks[1].x + x as u16, chunks[1].y));
     }
-    if let Some(input) = &app.base_input {
-        base_prompt(frame, area, input, app.base_error.as_deref());
+    if let Some(picker) = &mut app.branch_picker {
+        branch_picker(frame, area, picker);
     }
     if app.show_help {
         help(frame, area);
@@ -319,53 +319,78 @@ fn clip_spans(spans: &[Span<'_>], offset: usize, width: usize) -> Vec<Span<'stat
     result
 }
 
-fn base_prompt(frame: &mut Frame, area: Rect, input: &str, error: Option<&str>) {
+fn branch_picker(frame: &mut Frame, area: Rect, picker: &mut BranchPicker) {
     let width = area.width.saturating_sub(4).min(76);
-    let height = area.height.saturating_sub(2).min(9);
+    let height = area.height.saturating_sub(2).min(18);
     let popup = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
         width,
         height,
     );
-    let block = pane(" Base branch ".into(), true);
+    let block = pane(" Base branch ".into(), true).title_bottom(format!(
+        " {}/{} branches ",
+        picker.visible.len(),
+        picker.branches.len()
+    ));
     let inner = block.inner(popup);
-    let input = safe_text(input);
-    let available = inner.width.saturating_sub(3) as usize;
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new("Merge base → HEAD: committed changes since divergence"),
+        chunks[0],
+    );
+    let input = safe_text(&picker.input);
+    let available = chunks[1].width.saturating_sub(3) as usize;
     let offset = input.width().saturating_sub(available);
     let visible = clip_spans(&[Span::raw(input.clone())], offset, available);
     let mut field = vec![Span::styled("> ", Style::default().fg(ACCENT))];
     field.extend(visible);
-    let lines = vec![
-        Line::raw("Merge base → HEAD: committed changes since divergence"),
-        Line::raw(""),
-        Line::from(field),
-        Line::styled(
-            "Enter compare · Esc cancel · Ctrl+U clear",
-            Style::default().fg(ACCENT),
-        ),
-        Line::styled(
-            "Examples: main, origin/main — no checkout or fetch",
-            Style::default().fg(MUTED),
-        ),
-        Line::styled(
-            error
-                .map(safe_text)
-                .unwrap_or_else(|| "Staged, unstaged, and untracked changes are excluded".into()),
-            Style::default().fg(if error.is_some() { RED } else { MUTED }),
-        ),
-    ];
-    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(Line::from(field)), chunks[1]);
+    let items: Vec<ListItem> = picker
+        .visible
+        .iter()
+        .map(|&index| ListItem::new(safe_text(&picker.branches[index])))
+        .collect();
+    let list = List::new(items)
+        .highlight_symbol("▸ ")
+        .highlight_style(Style::default().bg(HUNK_BG).add_modifier(Modifier::BOLD));
+    frame.render_stateful_widget(list, chunks[2], &mut picker.list_state);
+    if picker.visible.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matching branches — type a ref, then Enter")
+                .style(Style::default().fg(MUTED)),
+            chunks[2],
+        );
+    }
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .style(Style::default().bg(PANEL)),
-        popup,
+        Paragraph::new("↑/↓ select · Type to filter · Enter compare · Esc cancel")
+            .style(Style::default().fg(ACCENT)),
+        chunks[3],
     );
-    if inner.width > 0 && inner.height > 2 {
-        let x =
-            (2 + input.width().saturating_sub(offset)).min(inner.width.saturating_sub(1) as usize);
-        frame.set_cursor_position((inner.x + x as u16, inner.y + 2));
+    frame.render_widget(
+        Paragraph::new(
+            picker
+                .error
+                .as_deref()
+                .map(safe_text)
+                .unwrap_or_else(|| "Ctrl+U clear · Local/remote refs; no checkout or fetch".into()),
+        )
+        .style(Style::default().fg(if picker.error.is_some() { RED } else { MUTED })),
+        chunks[4],
+    );
+    if chunks[1].width > 0 && chunks[1].height > 0 {
+        let x = (2 + input.width().saturating_sub(offset))
+            .min(chunks[1].width.saturating_sub(1) as usize);
+        frame.set_cursor_position((chunks[1].x + x as u16, chunks[1].y));
     }
 }
 
@@ -393,7 +418,7 @@ fn help(frame: &mut Frame, area: Rect) {
         Line::raw("Home/End or g/G     First / last row or file"),
         Line::raw("[ / ]               Previous / next hunk"),
         Line::raw("s                   Cycle working tree / staged / branch"),
-        Line::raw("b                   Compare against a base branch"),
+        Line::raw("b                   Select a base branch (type to filter)"),
         Line::raw("/                   Filter file paths (case-insensitive)"),
         Line::raw("Enter/Esc           Apply filter; Esc again clears it"),
         Line::raw("r                   Refresh manually"),
@@ -431,8 +456,19 @@ fn help(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::tests::repo;
+    use crate::git::tests::{git, repo};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
+
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
 
     #[test]
     fn crops_wide_unicode_without_splitting_cells() {
@@ -449,31 +485,58 @@ mod tests {
     }
 
     #[test]
-    fn branch_mode_and_prompt_are_visible() {
-        let (_dir, repo) = crate::git::tests::diverged_repo();
+    fn branch_mode_and_searchable_picker_are_visible() {
+        let (dir, repo) = crate::git::tests::diverged_repo();
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/main", "main"],
+        );
         let mut app = App::new(repo, true, Some("main".into())).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(text.contains("Branch main...HEAD"));
-        app.base_input = Some("origin/main".into());
+        assert!(screen(&terminal).contains("Branch main...HEAD"));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        let text = screen(&terminal);
         assert!(text.contains("Base branch"));
-        assert!(text.contains("> origin/main"));
+        assert!(text.contains("▸ main"));
+        assert!(text.contains("origin/main"));
+        assert!(text.contains("3/3 branches"));
+        assert!(text.contains("Type to filter"));
         assert!(text.contains("committed changes since divergence"));
+        for ch in "ori".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("> ori"));
+        assert!(text.contains("▸ origin/main"));
+        assert!(text.contains("1/3 branches"));
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("No matching branches"));
+        assert!(text.contains("Cannot resolve"));
+    }
+
+    #[test]
+    fn branch_picker_scrolls_to_keep_the_selection_visible() {
+        let (dir, repo) = crate::git::tests::diverged_repo();
+        for index in 0..30 {
+            git(dir.path(), &["branch", &format!("topic/{index:02}")]);
+        }
+        let mut app = App::new(repo, false, None).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        for (width, height) in [(80, 24), (40, 12)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            assert!(screen(&terminal).contains("▸ topic/29"));
+            app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            assert!(screen(&terminal).contains("▸ feature"));
+        }
     }
 
     #[test]
@@ -489,17 +552,17 @@ mod tests {
                 app.show_help = true;
                 terminal.draw(|frame| draw(frame, &mut app)).unwrap();
                 app.show_help = false;
-                app.base_input = Some("very-long/界/branch/".repeat(20));
-                app.base_error = Some("Cannot resolve revision".into());
+                app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+                let picker = app.branch_picker.as_mut().unwrap();
+                picker.input = "very-long/界/branch/".repeat(20);
+                picker.error = Some("Cannot resolve revision".into());
                 terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-                app.base_input = None;
-                app.base_error = None;
+                app.branch_picker = None;
             }
         }
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        let text = screen(&terminal);
         assert!(text.contains("main.rs"));
         assert!(text.contains("fn main()"));
         assert!(text.contains("Rust"));

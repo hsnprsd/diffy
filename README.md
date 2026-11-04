@@ -73,10 +73,14 @@ current branch **since the branches diverged**, not changes made only on `main`.
 Staged, unstaged, and untracked changes are excluded. The base branch and HEAD
 must have a common ancestor, and HEAD must have at least one commit.
 
-Press **`b`** to enter or change the base branch without restarting. `Enter`
-applies the comparison, `Esc` cancels, and `Ctrl+U` clears the input. Invalid refs
-leave the previous view intact. After a base is selected, **`s`** cycles through
-Working tree → Staged → Branch → Working tree; `b` jumps directly to Branch.
+Press **`b`** to select or change the base branch without restarting. Browse local
+and remote-tracking branches with **`↑`/`↓`** (or `Tab`/`Shift+Tab`), then press
+**`Enter`** to compare. Type to filter the list (case-insensitive); `Ctrl+U` clears
+the filter, and `Esc` cancels. The current base is highlighted when reopening the
+picker. You can still enter another ref, such as a tag or commit, when no branches
+match. Invalid refs leave the previous view intact. After a base is selected,
+**`s`** cycles through Working tree → Staged → Branch → Working tree; `b` jumps
+directly to Branch after confirming a selection.
 
 Both revisions are pinned for each refresh so a moving branch cannot mix a file
 list from one commit with a preview from another. Watching recomputes the
@@ -98,7 +102,7 @@ branches or fetches updates. Fetch them yourself when needed.
 | `Home` / `End`, `g` / `G` | First / last row or file |
 | `[` / `]` | Previous / next hunk |
 | `s` | Cycle working-tree / staged / branch views (branch requires a selected base) |
-| `b` | Enter/change the base branch and open the branch comparison |
+| `b` | Select the base branch from a searchable list and open the branch comparison |
 | `/` | Filter file paths; type to update live |
 | `Enter` / `Esc` while filtering | Apply filter |
 | `Ctrl+U` while filtering | Clear filter |
@@ -150,4 +154,5 @@ conflicts, binary/large files, unusual paths, submodules, linked worktrees, all
 bundled highlighting queries, diff hunks, keyboard navigation, small terminal
 layouts, filesystem/index/ref notifications, and CLI errors. Branch tests cover
 merge-base semantics, exclusion of uncommitted changes, immutable snapshots,
-remote-tracking refs, missing/unrelated history, and comparison-mode navigation.
+remote-tracking refs, missing/unrelated history, comparison-mode navigation, and
+branch selection/filtering.
