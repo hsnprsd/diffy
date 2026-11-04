@@ -390,11 +390,10 @@ impl App {
                     Focus::Files
                 };
             }
-            KeyCode::Enter => self.focus = Focus::Diff,
+            KeyCode::Left => self.focus = Focus::Files,
+            KeyCode::Right | KeyCode::Enter => self.focus = Focus::Diff,
             KeyCode::Char('j') | KeyCode::Down => self.vertical(1),
             KeyCode::Char('k') | KeyCode::Up => self.vertical(-1),
-            KeyCode::Char('n') => self.move_file(1),
-            KeyCode::Char('p') => self.move_file(-1),
             KeyCode::PageDown | KeyCode::Char('d') => {
                 self.vertical(self.viewport_height.saturating_sub(2).max(1) as isize)
             }
@@ -403,10 +402,8 @@ impl App {
             }
             KeyCode::Home | KeyCode::Char('g') => self.vertical(-(isize::MAX)),
             KeyCode::End | KeyCode::Char('G') => self.vertical(isize::MAX),
-            KeyCode::Char('h') | KeyCode::Left => {
-                self.horizontal = self.horizontal.saturating_sub(4)
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
+            KeyCode::Char('h') => self.horizontal = self.horizontal.saturating_sub(4),
+            KeyCode::Char('l') => {
                 self.horizontal = self.horizontal.saturating_add(4).min(self.max_horizontal())
             }
             KeyCode::Char(']') => self.hunk(true),
@@ -460,12 +457,87 @@ mod tests {
     }
 
     #[test]
+    fn arrow_keys_focus_panes_without_changing_selection_or_scroll() {
+        let (dir, repo) = repo();
+        let content = format!("{}\n", "x".repeat(120)).repeat(30);
+        std::fs::write(dir.path().join("a.txt"), content).unwrap();
+        std::fs::write(dir.path().join("b.txt"), "other\n").unwrap();
+        let mut app = App::new(repo, None).unwrap();
+        app.handle_key(key('l'));
+        assert_eq!(app.horizontal, 4);
+        app.scroll = 2;
+        let selected = app.selected().unwrap().path.clone();
+        for (code, focus) in [
+            (KeyCode::Left, Focus::Files),
+            (KeyCode::Right, Focus::Diff),
+            (KeyCode::Right, Focus::Diff),
+            (KeyCode::Left, Focus::Files),
+            (KeyCode::Left, Focus::Files),
+            (KeyCode::Tab, Focus::Diff),
+            (KeyCode::BackTab, Focus::Files),
+        ] {
+            assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
+            assert!(app.focus == focus);
+            assert_eq!(app.selected().unwrap().path, selected);
+            assert_eq!(app.horizontal, 4);
+            assert_eq!(app.scroll, 2);
+        }
+        app.handle_key(key('h'));
+        assert_eq!(app.horizontal, 0);
+    }
+
+    #[test]
+    fn pane_arrows_do_not_interrupt_branch_picker() {
+        let (_dir, repo) = diverged_repo();
+        let mut app = App::new(repo, None).unwrap();
+        app.handle_key(key('b'));
+        for code in [KeyCode::Right, KeyCode::Left] {
+            assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
+            assert!(app.branch_picker.is_some());
+            assert!(app.focus == Focus::Files);
+        }
+    }
+
+    #[test]
+    fn vertical_navigation_uses_the_focused_pane() {
+        let (dir, repo) = repo();
+        let content = "line\n".repeat(30);
+        std::fs::write(dir.path().join("a.txt"), &content).unwrap();
+        std::fs::write(dir.path().join("b.txt"), &content).unwrap();
+        let mut app = App::new(repo, None).unwrap();
+        for (code, path) in [
+            (KeyCode::Down, "b.txt"),
+            (KeyCode::Up, "a.txt"),
+            (KeyCode::Char('j'), "b.txt"),
+            (KeyCode::Char('k'), "a.txt"),
+        ] {
+            assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
+            assert_eq!(app.selected().unwrap().path, PathBuf::from(path));
+            assert_eq!(app.scroll, 0);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        for (code, scroll) in [
+            (KeyCode::Down, 1),
+            (KeyCode::Char('j'), 2),
+            (KeyCode::Up, 1),
+            (KeyCode::Char('k'), 0),
+        ] {
+            assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
+            assert_eq!(app.selected().unwrap().path, PathBuf::from("a.txt"));
+            assert_eq!(app.scroll, scroll);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
+    }
+
+    #[test]
     fn filtering_navigation_and_refresh_preserve_selection() {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         std::fs::write(dir.path().join("b.py"), "print(1)\n").unwrap();
         let mut app = App::new(repo, None).unwrap();
-        app.handle_key(key('n'));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.selected().unwrap().path, PathBuf::from("b.py"));
         std::fs::write(dir.path().join("0.txt"), "new file").unwrap();
         app.refresh();
@@ -730,7 +802,7 @@ mod tests {
     fn empty_repository_and_help_are_safe() {
         let (_dir, repo) = repo();
         let mut app = App::new(repo, None).unwrap();
-        for ch in ['n', 'p', 'G', 'g', '[', ']', 'l', 'h', 's', 'r'] {
+        for ch in ['j', 'k', 'G', 'g', '[', ']', 'l', 'h', 's', 'r'] {
             assert!(!app.handle_key(key(ch)));
         }
         assert!(app.selected().is_none());

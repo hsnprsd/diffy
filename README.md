@@ -93,11 +93,11 @@ branches or fetches updates. Fetch them yourself when needed.
 
 | Key | Action |
 | --- | --- |
+| `←` / `→` | Focus files / diff |
 | `Tab` / `Shift+Tab` | Switch focus between files and diff |
 | `Enter` | Focus the diff |
-| `j` / `k`, `↓` / `↑` | Move in the focused pane |
-| `n` / `p` | Next / previous file, regardless of focus |
-| `h` / `l`, `←` / `→` | Scroll code horizontally |
+| `j` / `k`, `↓` / `↑` | Select files in the Files pane; scroll in the Diff pane |
+| `h` / `l` | Scroll code horizontally |
 | `PageUp` / `PageDown`, `u` / `d` | Page up / down |
 | `Home` / `End`, `g` / `G` | First / last row or file |
 | `[` / `]` | Previous / next hunk |
@@ -111,7 +111,7 @@ branches or fetches updates. Fetch them yourself when needed.
 | `?` / `F1` | Help (any key closes it) |
 | `q` / `Ctrl+C` | Quit |
 
-Below 80 columns, only the focused pane is shown; `Tab` switches panes.
+Below 80 columns, only the focused pane is shown; `←` / `→` or `Tab` switches panes.
 
 ## Highlighting
 

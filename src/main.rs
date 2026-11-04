@@ -31,7 +31,7 @@ fn main() -> Result<()> {
                  PATH defaults to the current directory; subdirectories are accepted.\n\
                  --no-watch     Disable filesystem watching (use r to refresh)\n\
                  --base, -b REF Compare merge-base(REF, HEAD) to HEAD (committed only)\n\n\
-                 Keys: Tab focus · j/k scroll · n/p files · s cycle views\n\
+                 Keys: ←/→/Tab focus · ↑/↓/j/k move · s cycle views\n\
                        b select base branch · [/] hunks · / filter · ? help · q quit\n\n\
                  Read-only: never stages, discards, or changes your files."
             );

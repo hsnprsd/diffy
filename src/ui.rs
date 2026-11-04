@@ -124,7 +124,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         )
     } else {
         Line::styled(
-            " Tab focus · j/k scroll · n/p files · [/] hunks · b branch · r refresh · ? help · q quit",
+            " ←/→/Tab focus · ↑/↓/j/k move · [/] hunks · b branch · r refresh · ? help · q quit",
             Style::default().fg(MUTED),
         )
     };
@@ -404,11 +404,10 @@ fn help(frame: &mut Frame, area: Rect) {
             Style::default().fg(ACCENT).bold(),
         ),
         Line::raw(""),
-        Line::raw("Tab                 Switch files / diff focus"),
-        Line::raw("j/k or ↑/↓           Move in the focused pane"),
+        Line::raw("←/→ or Tab          Switch files / diff focus"),
+        Line::raw("j/k or ↑/↓          Select files / scroll diff"),
         Line::raw("Enter               Focus the diff"),
-        Line::raw("n / p               Next / previous file"),
-        Line::raw("h/l or ←/→           Scroll code horizontally"),
+        Line::raw("h/l                 Scroll code horizontally"),
         Line::raw("PgUp/PgDn or u/d    Page up / down"),
         Line::raw("Home/End or g/G     First / last row or file"),
         Line::raw("[ / ]               Previous / next hunk"),
@@ -433,7 +432,7 @@ fn help(frame: &mut Frame, area: Rect) {
             Style::default().fg(MUTED),
         ),
         Line::styled(
-            "On narrow terminals, Tab switches between panes.",
+            "On narrow terminals, ←/→ or Tab switches panes.",
             Style::default().fg(MUTED),
         ),
         Line::raw(""),
@@ -542,7 +541,12 @@ mod tests {
         for (width, height) in [(120, 30), (80, 24), (40, 12), (10, 4), (1, 1)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             for focus in [Focus::Files, Focus::Diff] {
-                app.focus = focus;
+                let code = match focus {
+                    Focus::Files => KeyCode::Left,
+                    Focus::Diff => KeyCode::Right,
+                };
+                app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+                assert!(app.focus == focus);
                 terminal.draw(|frame| draw(frame, &mut app)).unwrap();
                 app.show_help = true;
                 terminal.draw(|frame| draw(frame, &mut app)).unwrap();
