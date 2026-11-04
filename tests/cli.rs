@@ -25,6 +25,7 @@ fn help_describes_automatic_updates_and_pane_navigation() {
     assert!(help.contains("↑/↓/j/k move"));
     assert!(!help.contains("--no-watch"));
     assert!(!help.contains("n/p"));
+    assert!(!help.contains("/ filter"));
 }
 
 #[test]

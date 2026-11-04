@@ -7,11 +7,10 @@ Tree-sitter, and native filesystem notifications.
   preserving multiline comments and strings. Added/removed lines have distinct
   backgrounds, with old/new line numbers and three lines of context.
 - **Live updates:** edits, creates, deletes, renames, staging, commits, and branch
-  changes trigger a debounced refresh. Selection, filtering, and scroll position
-  are preserved where possible. Git object writes and file-access events are ignored.
-- **File sidebar:** status indicators, case-insensitive path filtering, file/hunk
-  navigation, horizontal scrolling with fixed gutters, and a compact single-pane
-  layout for narrow terminals.
+  changes trigger a debounced refresh. Selection and scroll position are preserved
+  where possible. Git object writes and file-access events are ignored.
+- **File sidebar:** status indicators, file/hunk navigation, horizontal scrolling
+  with fixed gutters, and a compact single-pane layout for narrow terminals.
 - **Working tree, staged, and branch views:** inspect uncommitted changes or a
   merge-request-style diff against another branch. Supports local/remote-tracking
   refs, detached HEADs, and linked worktrees; uncommitted views also work on unborn
@@ -102,10 +101,6 @@ branches or fetches updates. Fetch them yourself when needed.
 | `[` / `]` | Previous / next hunk |
 | `s` | Cycle working-tree / staged / branch views (branch requires a selected base) |
 | `b` | Select the base branch from a searchable list and open the branch comparison |
-| `/` | Filter file paths; type to update live |
-| `Enter` / `Esc` while filtering | Apply filter |
-| `Ctrl+U` while filtering | Clear filter |
-| `Esc` outside filtering | Clear filter |
 | `?` / `F1` | Help (any key closes it) |
 | `q` / `Ctrl+C` | Quit |
 

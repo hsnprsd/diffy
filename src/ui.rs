@@ -86,18 +86,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Style::default().fg(MUTED)
         },
     ));
-    if app.editing_filter || !app.filter.is_empty() {
-        tabs.push(Span::styled(
-            format!("   /{}", safe_text(&app.filter)),
-            Style::default().fg(ACCENT),
-        ));
-    } else {
-        tabs.push(Span::styled(
-            "   / filter files",
-            Style::default().fg(MUTED),
-        ));
-    }
-    let filter_cursor: usize = tabs.iter().map(Span::width).sum();
     frame.render_widget(
         Paragraph::new(Line::from(tabs)).style(Style::default().bg(PANEL)),
         chunks[1],
@@ -117,11 +105,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     let footer = if let Some(error) = &app.error {
         Line::styled(format!(" {}", safe_text(error)), Style::default().fg(RED))
-    } else if app.editing_filter {
-        Line::styled(
-            " Type to filter · Enter/Esc apply · Ctrl+U clear",
-            Style::default().fg(ACCENT),
-        )
     } else {
         Line::styled(
             " ←/→/Tab focus · ↑/↓/j/k move · [/] hunks · b branch · ? help · q quit",
@@ -132,10 +115,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(footer).style(Style::default().bg(PANEL)),
         chunks[3],
     );
-    if app.editing_filter && !app.show_help && chunks[1].width > 0 {
-        let x = filter_cursor.min(chunks[1].width.saturating_sub(1) as usize);
-        frame.set_cursor_position((chunks[1].x + x as u16, chunks[1].y));
-    }
     if let Some(picker) = &mut app.branch_picker {
         branch_picker(frame, area, picker);
     }
@@ -154,15 +133,14 @@ fn pane(title: String, focused: bool) -> Block<'static> {
 
 fn files(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = pane(
-        format!(" Files {}/{} ", app.visible.len(), app.files.len()),
+        format!(" Files {} ", app.files.len()),
         app.focus == Focus::Files,
     );
     let inner = block.inner(area);
     let items: Vec<ListItem> = app
-        .visible
+        .files
         .iter()
-        .map(|&index| {
-            let entry = &app.files[index];
+        .map(|entry| {
             let color = match entry.status {
                 'A' | '?' => GREEN,
                 'D' | 'U' => RED,
@@ -179,14 +157,9 @@ fn files(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_symbol("▸ ")
         .highlight_style(Style::default().bg(HUNK_BG).add_modifier(Modifier::BOLD));
     frame.render_stateful_widget(list, area, &mut app.list_state);
-    if app.visible.is_empty() {
-        let message = if app.files.is_empty() {
-            " No changes"
-        } else {
-            " No matches"
-        };
+    if app.files.is_empty() {
         frame.render_widget(
-            Paragraph::new(message).style(Style::default().fg(MUTED)),
+            Paragraph::new(" No changes").style(Style::default().fg(MUTED)),
             inner,
         );
     }
@@ -413,8 +386,6 @@ fn help(frame: &mut Frame, area: Rect) {
         Line::raw("[ / ]               Previous / next hunk"),
         Line::raw("s                   Cycle working tree / staged / branch"),
         Line::raw("b                   Select a base branch (type to filter)"),
-        Line::raw("/                   Filter file paths (case-insensitive)"),
-        Line::raw("Enter/Esc           Apply filter; Esc again clears it"),
         Line::raw("? / F1              Show help"),
         Line::raw("q / Ctrl+C          Quit"),
         Line::raw(""),

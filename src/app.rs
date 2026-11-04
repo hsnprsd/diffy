@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
@@ -83,7 +81,6 @@ pub struct App {
     pub base_branch: Option<String>,
     pub branch_picker: Option<BranchPicker>,
     pub files: Vec<FileEntry>,
-    pub visible: Vec<usize>,
     pub list_state: ListState,
     pub view: DiffView,
     pub focus: Focus,
@@ -91,8 +88,6 @@ pub struct App {
     pub horizontal: usize,
     pub viewport_height: usize,
     pub viewport_width: usize,
-    pub filter: String,
-    pub editing_filter: bool,
     pub show_help: bool,
     pub error: Option<String>,
     highlighter: SyntaxHighlighter,
@@ -106,12 +101,10 @@ impl App {
             None => Mode::Working,
         };
         let files = repo.files(mode.clone())?;
-        let visible = (0..files.len()).collect();
         let mut app = Self {
             repo,
             branch,
             files,
-            visible,
             mode,
             base_branch,
             branch_picker: None,
@@ -122,17 +115,11 @@ impl App {
             horizontal: 0,
             viewport_height: 20,
             viewport_width: 80,
-            filter: String::new(),
-            editing_filter: false,
             show_help: false,
             error: None,
             highlighter: SyntaxHighlighter::default(),
         };
-        app.list_state.select(if app.visible.is_empty() {
-            None
-        } else {
-            Some(0)
-        });
+        app.list_state.select((!app.files.is_empty()).then_some(0));
         app.load_selected();
         Ok(app)
     }
@@ -140,8 +127,7 @@ impl App {
     pub fn selected(&self) -> Option<&FileEntry> {
         self.list_state
             .selected()
-            .and_then(|selected| self.visible.get(selected))
-            .and_then(|&index| self.files.get(index))
+            .and_then(|selected| self.files.get(selected))
     }
 
     pub fn refresh(&mut self) {
@@ -171,8 +157,12 @@ impl App {
         self.mode = mode;
         self.files = files;
         self.error = None;
-        self.filter_files(selected);
-        if reset_scroll {
+        let position = selected
+            .as_ref()
+            .and_then(|path| self.files.iter().position(|entry| &entry.path == path));
+        self.list_state
+            .select(position.or_else(|| (!self.files.is_empty()).then_some(0)));
+        if reset_scroll || self.selected().map(|entry| &entry.path) != selected.as_ref() {
             self.scroll = 0;
             self.horizontal = 0;
         }
@@ -199,39 +189,9 @@ impl App {
         self.update(mode, true)
     }
 
-    fn filter_files(&mut self, selected: Option<PathBuf>) {
-        let needle = self.filter.to_lowercase();
-        self.visible = self
-            .files
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                entry
-                    .path
-                    .to_string_lossy()
-                    .to_lowercase()
-                    .contains(&needle)
-            })
-            .map(|(index, _)| index)
-            .collect();
-        let position = selected.as_ref().and_then(|path| {
-            self.visible
-                .iter()
-                .position(|&index| &self.files[index].path == path)
-        });
-        self.list_state
-            .select(position.or_else(|| (!self.visible.is_empty()).then_some(0)));
-        if self.selected().map(|entry| &entry.path) != selected.as_ref() {
-            self.scroll = 0;
-            self.horizontal = 0;
-        }
-    }
-
     fn load_selected(&mut self) {
         let Some(entry) = self.selected().cloned() else {
-            self.view = DiffView::notice(if !self.files.is_empty() {
-                "No files match the filter"
-            } else if self.mode.is_branch() {
+            self.view = DiffView::notice(if self.mode.is_branch() {
                 "No committed changes since the merge base"
             } else {
                 "No changes — working tree/index is clean"
@@ -263,13 +223,13 @@ impl App {
     }
 
     fn move_file(&mut self, delta: isize) {
-        if self.visible.is_empty() {
+        if self.files.is_empty() {
             return;
         }
         let selected = self.list_state.selected().unwrap_or(0);
         let next = selected
             .saturating_add_signed(delta)
-            .min(self.visible.len() - 1);
+            .min(self.files.len() - 1);
         if next != selected {
             self.list_state.select(Some(next));
             self.scroll = 0;
@@ -355,29 +315,6 @@ impl App {
             }
             return false;
         }
-        if self.editing_filter {
-            let selected = self.selected().map(|entry| entry.path.clone());
-            match key.code {
-                KeyCode::Enter | KeyCode::Esc => self.editing_filter = false,
-                KeyCode::Backspace => {
-                    self.filter.pop();
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.filter.clear()
-                }
-                KeyCode::Char(ch)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    self.filter.push(ch)
-                }
-                _ => return false,
-            }
-            self.filter_files(selected);
-            self.load_selected();
-            return false;
-        }
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
@@ -418,13 +355,6 @@ impl App {
                 }
                 Err(error) => self.error = Some(format!("Branches: {error:#}")),
             },
-            KeyCode::Char('/') => self.editing_filter = true,
-            KeyCode::Esc => {
-                let selected = self.selected().map(|entry| entry.path.clone());
-                self.filter.clear();
-                self.filter_files(selected);
-                self.load_selected();
-            }
             _ => {}
         }
         false
@@ -446,6 +376,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::git::tests::{diverged_repo, git, repo};
 
@@ -529,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_shortcuts_do_not_navigate_or_refresh() {
+    fn removed_shortcuts_do_not_navigate_refresh_or_filter() {
         let (dir, repo) = repo();
         for path in ["a.txt", "b.txt", "c.txt"] {
             std::fs::write(dir.path().join(path), "line\n").unwrap();
@@ -539,7 +471,7 @@ mod tests {
         std::fs::write(dir.path().join("d.txt"), "new file\n").unwrap();
         for code in [KeyCode::Left, KeyCode::Right] {
             app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
-            for ch in ['n', 'p', 'r'] {
+            for ch in ['n', 'p', 'r', '/'] {
                 assert!(!app.handle_key(key(ch)));
                 assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
                 assert_eq!(app.files.len(), 3);
@@ -552,27 +484,32 @@ mod tests {
     }
 
     #[test]
-    fn filtering_navigation_and_refresh_preserve_selection() {
+    fn refresh_preserves_selection_and_scroll_until_selected_file_disappears() {
         let (dir, repo) = repo();
-        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
-        std::fs::write(dir.path().join("b.py"), "print(1)\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "first file\n").unwrap();
+        let content = format!("{}\n", "x".repeat(120)).repeat(30);
+        std::fs::write(dir.path().join("b.txt"), content).unwrap();
         let mut app = App::new(repo, None).unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.selected().unwrap().path, PathBuf::from("b.py"));
-        std::fs::write(dir.path().join("0.txt"), "new file").unwrap();
+        app.scroll = 2;
+        app.horizontal = 4;
+        std::fs::write(dir.path().join("0.txt"), "new file\n").unwrap();
         app.refresh();
-        assert_eq!(app.selected().unwrap().path, PathBuf::from("b.py"));
-        app.handle_key(key('/'));
-        for ch in ".rs".chars() {
-            app.handle_key(key(ch));
+        assert_eq!(app.files.len(), 3);
+        assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
+        assert_eq!(app.scroll, 2);
+        assert_eq!(app.horizontal, 4);
+        std::fs::remove_file(dir.path().join("b.txt")).unwrap();
+        app.refresh();
+        assert_eq!(app.selected().unwrap().path, PathBuf::from("0.txt"));
+        assert_eq!(app.scroll, 0);
+        assert_eq!(app.horizontal, 0);
+        for path in ["0.txt", "a.txt"] {
+            std::fs::remove_file(dir.path().join(path)).unwrap();
         }
-        assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.selected().unwrap().path, PathBuf::from("a.rs"));
-        assert!(!app.handle_key(key('q'))); // q is part of the filter, not quit.
-        assert!(app.visible.is_empty());
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.visible.len(), 3);
+        app.refresh();
+        assert!(app.files.is_empty());
+        assert!(app.selected().is_none());
     }
 
     #[test]

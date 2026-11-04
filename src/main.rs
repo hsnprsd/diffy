@@ -31,7 +31,7 @@ fn main() -> Result<()> {
                  --base, -b REF Compare merge-base(REF, HEAD) to HEAD (committed only)\n\n\
                  Updates automatically when repository files or refs change.\n\
                  Keys: ←/→/Tab focus · ↑/↓/j/k move · s cycle views\n\
-                       b select base branch · [/] hunks · / filter · ? help · q quit\n\n\
+                       b select base branch · [/] hunks · ? help · q quit\n\n\
                  Read-only: never stages, discards, or changes your files."
             );
             return Ok(());
