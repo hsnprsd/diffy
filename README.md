@@ -11,6 +11,8 @@ Tree-sitter, and native filesystem notifications.
   where possible. Git object writes and file-access events are ignored.
 - **File sidebar:** status indicators, file/hunk navigation, horizontal scrolling
   with fixed gutters, and a compact single-pane layout for narrow terminals.
+- **Black dark theme:** true-black panes, subtle charcoal panels, and colored diff
+  highlights.
 - **Working tree, staged, and branch views:** inspect uncommitted changes or a
   merge-request-style diff against another branch. Supports local/remote-tracking
   refs, detached HEADs, and linked worktrees; uncommitted views also work on unborn

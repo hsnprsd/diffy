@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::git::safe_text;
 
-pub const TEXT: Color = Color::Rgb(192, 202, 225);
+pub const TEXT: Color = Color::Rgb(212, 212, 212);
 const CAPTURES: &[&str] = &[
     "attribute",
     "boolean",

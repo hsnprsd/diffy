@@ -17,16 +17,16 @@ use crate::{
     highlight::TEXT,
 };
 
-const BG: Color = Color::Rgb(17, 21, 31);
-const PANEL: Color = Color::Rgb(22, 28, 40);
-const MUTED: Color = Color::Rgb(115, 130, 155);
-const BORDER: Color = Color::Rgb(54, 65, 86);
+const BG: Color = Color::Rgb(0, 0, 0);
+const PANEL: Color = Color::Rgb(10, 10, 10);
+const MUTED: Color = Color::Rgb(128, 128, 128);
+const BORDER: Color = Color::Rgb(48, 48, 48);
 const ACCENT: Color = Color::Rgb(122, 162, 247);
 const GREEN: Color = Color::Rgb(158, 206, 106);
 const RED: Color = Color::Rgb(247, 118, 142);
-const ADD_BG: Color = Color::Rgb(25, 48, 39);
-const DEL_BG: Color = Color::Rgb(55, 29, 40);
-const HUNK_BG: Color = Color::Rgb(28, 37, 57);
+const ADD_BG: Color = Color::Rgb(8, 28, 14);
+const DEL_BG: Color = Color::Rgb(32, 10, 12);
+const HUNK_BG: Color = Color::Rgb(24, 24, 24);
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -432,6 +432,31 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn renders_black_theme_without_removed_controls() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo, None).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(119, 0)].bg, Color::Rgb(0, 0, 0));
+        assert_eq!(buffer[(1, 5)].bg, Color::Rgb(0, 0, 0));
+        assert_eq!(buffer[(119, 1)].bg, PANEL);
+        assert_eq!(buffer[(119, 29)].bg, PANEL);
+        let text = screen(&terminal);
+        assert!(text.contains("Files 0"));
+        assert!(!text.contains("filter files"));
+        assert!(!text.contains("r refresh"));
+        assert!(!text.contains("n/p files"));
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Select files / scroll diff"));
+        assert!(!text.contains("Filter file paths"));
+        assert!(!text.contains("Refresh manually"));
+        assert!(!text.contains("Next / previous file"));
     }
 
     #[test]
