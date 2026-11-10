@@ -43,6 +43,12 @@ pub fn spawn(repo: Repository, operation: Operation) -> OperationHandle {
             .operation_command(&operation)
             .and_then(|prepared| {
                 let _ = sender.send(OperationEvent::Prepared(prepared.success_message));
+                if let Some(preparation) = prepared.preparation {
+                    let result = run(preparation, None, &sender, &cancellation)?;
+                    if result != OperationResult::Success {
+                        return Ok(result);
+                    }
+                }
                 run(prepared.command, prepared.input, &sender, &cancellation)
             })
             .unwrap_or_else(|error| OperationResult::Failed(format!("{error:#}")));

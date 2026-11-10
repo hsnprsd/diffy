@@ -58,6 +58,7 @@ impl Operation {
 }
 
 pub struct OperationCommand {
+    pub preparation: Option<Command>,
     pub command: Command,
     pub input: Option<String>,
     pub success_message: String,
@@ -275,6 +276,7 @@ impl Repository {
 
     pub fn operation_command(&self, operation: &Operation) -> Result<OperationCommand> {
         let mut cmd = command(&self.root);
+        let mut preparation = None;
         let mut success_message = "Committed".to_owned();
         // Capture command output and disable Git's terminal prompts. Authentication
         // and signing can still use configured agents or askpass programs.
@@ -284,6 +286,13 @@ impl Repository {
         let input = match operation {
             Operation::Commit(message) => {
                 anyhow::ensure!(!message.trim().is_empty(), "Enter a commit message");
+                if self.staged_files()?.is_empty() {
+                    let mut stage = command(&self.root);
+                    stage
+                        .env("GIT_TERMINAL_PROMPT", "0")
+                        .args(["add", "-A", "--"]);
+                    preparation = Some(stage);
+                }
                 cmd.args(["commit", "--cleanup=whitespace", "-F", "-"]);
                 Some(message.clone())
             }
@@ -351,6 +360,7 @@ impl Repository {
             }
         };
         Ok(OperationCommand {
+            preparation,
             command: cmd,
             input,
             success_message,
@@ -360,8 +370,14 @@ impl Repository {
     #[cfg(test)]
     pub fn run_operation(&self, operation: &Operation) -> Result<String> {
         let OperationCommand {
-            mut command, input, ..
+            preparation,
+            mut command,
+            input,
+            ..
         } = self.operation_command(operation)?;
+        if let Some(mut preparation) = preparation {
+            ensure_success(&preparation.output()?)?;
+        }
         let output = match input {
             Some(input) => with_input(command, input.as_bytes())?,
             None => command.output()?,
@@ -919,6 +935,100 @@ pub mod tests {
         let entry = repo.staged_files().unwrap().remove(0);
         repo.toggle_file(&entry).unwrap();
         assert_eq!(fs::read(dir.path().join("file.txt")).unwrap(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn commits_untracked_files_when_nothing_is_staged() {
+        let (dir, repo) = repo();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested/new file.txt"), "new\n").unwrap();
+        fs::write(dir.path().join(".gitignore"), "ignored\n").unwrap();
+        fs::write(dir.path().join("ignored"), "leave ignored\n").unwrap();
+
+        repo.run_operation(&Operation::Commit("Initial changes".into()))
+            .unwrap();
+
+        let tree = repo
+            .output(&["ls-tree", "-r", "--name-only", "HEAD"])
+            .unwrap();
+        assert_eq!(tree.stdout, b".gitignore\nnested/new file.txt\n");
+        assert_eq!(
+            text(
+                repo.blob("HEAD:", Path::new("nested/new file.txt"))
+                    .unwrap()
+            ),
+            "new\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("ignored")).unwrap(),
+            "leave ignored\n"
+        );
+        assert!(repo.files().unwrap().is_empty());
+    }
+
+    #[test]
+    fn commits_all_changes_when_nothing_is_staged() {
+        let (dir, repo) = repo();
+        fs::write(dir.path().join("modified.txt"), "original\n").unwrap();
+        fs::write(dir.path().join("deleted.txt"), "delete me\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "Initial"]);
+        fs::write(dir.path().join("modified.txt"), "changed\n").unwrap();
+        fs::remove_file(dir.path().join("deleted.txt")).unwrap();
+        fs::write(dir.path().join("-new [file].bin"), [0, 1, 2]).unwrap();
+
+        repo.run_operation(&Operation::Commit("All changes".into()))
+            .unwrap();
+
+        let tree = repo
+            .output(&["ls-tree", "-r", "--name-only", "HEAD"])
+            .unwrap();
+        assert_eq!(tree.stdout, b"-new [file].bin\nmodified.txt\n");
+        assert_eq!(
+            text(repo.blob("HEAD:", Path::new("modified.txt")).unwrap()),
+            "changed\n"
+        );
+        assert_eq!(
+            repo.output(&["show", "HEAD:-new [file].bin"])
+                .unwrap()
+                .stdout,
+            [0, 1, 2]
+        );
+        assert!(repo.files().unwrap().is_empty());
+    }
+
+    #[test]
+    fn automatic_staging_failure_does_not_create_a_commit() {
+        let (dir, repo) = repo();
+        git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
+        fs::write(dir.path().join("new.txt"), "new\n").unwrap();
+        fs::write(repo.git_dir.join("index.lock"), "locked").unwrap();
+
+        let error = repo
+            .run_operation(&Operation::Commit("All changes".into()))
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("index.lock"));
+        assert_eq!(
+            repo.output(&["log", "-1", "--format=%s"]).unwrap().stdout,
+            b"Initial\n"
+        );
+        assert_eq!(repo.files().unwrap().len(), 1);
+        assert!(repo.staged_files().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_commit_message_does_not_stage_changes() {
+        let (dir, repo) = repo();
+        fs::write(dir.path().join("new.txt"), "new\n").unwrap();
+
+        let error = repo
+            .run_operation(&Operation::Commit("  \n".into()))
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "Enter a commit message");
+        assert_eq!(repo.files().unwrap().len(), 1);
+        assert!(repo.staged_files().unwrap().is_empty());
     }
 
     #[test]

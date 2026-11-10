@@ -334,10 +334,7 @@ impl App {
 
     fn open_commit(&mut self) -> Result<()> {
         self.ensure_idle()?;
-        anyhow::ensure!(
-            !self.repo.staged_files()?.is_empty(),
-            "No staged changes to commit; stage changes with Space first"
-        );
+        anyhow::ensure!(!self.repo.files()?.is_empty(), "No changes to commit");
         self.commit_popup = Some(CommitPopup::default());
         self.error = None;
         Ok(())
@@ -1220,7 +1217,7 @@ mod tests {
         app.handle_key(key(' '));
         assert!(app.error.is_none());
         app.handle_key(key('c'));
-        assert!(app.error.as_ref().unwrap().contains("No staged changes"));
+        assert!(app.error.as_ref().unwrap().contains("No changes to commit"));
         assert!(app.commit_popup.is_none());
         std::fs::write(dir.path().join("binary"), [0, 1, 2]).unwrap();
         app.refresh();
@@ -1231,6 +1228,63 @@ mod tests {
         app.focus = Focus::Files;
         app.handle_key(key(' '));
         assert_eq!(app.repo.staged_files().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unstaged_changes_are_committed_only_after_submitting_the_message() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("first.txt"), "first\n").unwrap();
+        std::fs::write(dir.path().join("second.txt"), "second\n").unwrap();
+        let mut app = App::new(repo).unwrap();
+
+        app.handle_key(key('c'));
+        assert!(app.commit_popup.is_some(), "{:?}", app.error);
+        app.handle_paste("Cancelled message");
+        assert!(app.repo.staged_files().unwrap().is_empty());
+        assert!(app.operation_label().is_none());
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.commit_popup.is_none());
+        assert!(app.repo.staged_files().unwrap().is_empty());
+        assert_eq!(app.repo.files().unwrap().len(), 2);
+
+        app.handle_key(key('c'));
+        app.handle_paste("Commit everything");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(app.operation_label(), Some("Committing"));
+        wait_for_operation(&mut app);
+
+        assert!(app.commit_popup.is_none(), "{:?}", app.error);
+        assert!(matches!(app.status, Some(Status::Success(_))));
+        assert!(app.repo.files().unwrap().is_empty());
+        assert!(app.files.is_empty());
+    }
+
+    #[test]
+    fn commit_scope_uses_the_index_at_submission_instead_of_the_popup_snapshot() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("file.txt"), "staged later\n").unwrap();
+        let mut app = App::new(repo).unwrap();
+        app.handle_key(key('c'));
+        git(dir.path(), &["add", "."]);
+        std::fs::write(dir.path().join("file.txt"), "unstaged\n").unwrap();
+        std::fs::write(dir.path().join("untracked.txt"), "untracked\n").unwrap();
+
+        app.handle_paste("Commit the index");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        wait_for_operation(&mut app);
+
+        assert!(matches!(app.status, Some(Status::Success(_))));
+        assert_eq!(app.files.len(), 2);
+        assert_eq!(
+            crate::git::tests::text(app.repo.contents(&app.files[0]).unwrap().0),
+            "staged later\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+            "unstaged\n"
+        );
+        assert_eq!(app.files[1].path, PathBuf::from("untracked.txt"));
+        assert_eq!(app.files[1].status, '?');
     }
 
     #[test]
@@ -1315,11 +1369,53 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn failed_commit_keeps_the_message_and_staged_changes_for_retry() {
+    fn automatic_staging_streams_output_and_can_be_cancelled_before_committing() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join(".gitattributes"), "*.txt filter=wait\n").unwrap();
+        std::fs::write(dir.path().join("file.txt"), "new\n").unwrap();
+        git(
+            dir.path(),
+            &[
+                "config",
+                "filter.wait.clean",
+                "echo 'filter waiting' >&2; sleep 60; cat",
+            ],
+        );
+        git(dir.path(), &["config", "filter.wait.required", "true"]);
+        let mut app = App::new(repo).unwrap();
+        app.handle_key(key('c'));
+        app.handle_paste("Commit after staging");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        wait_for_output(&mut app, &["filter waiting"]);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        wait_for_operation(&mut app);
+
+        assert_eq!(
+            app.operation_details.as_ref().unwrap().result,
+            Some(OperationResult::Cancelled)
+        );
+        assert_eq!(
+            app.commit_popup.as_ref().unwrap().message,
+            "Commit after staging"
+        );
+        assert_eq!(app.repo.files().unwrap().len(), 2);
+        assert!(app.repo.staged_files().unwrap().is_empty());
+
+        git(dir.path(), &["config", "filter.wait.clean", "cat"]);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        wait_for_operation(&mut app);
+        assert!(matches!(app.status, Some(Status::Success(_))));
+        assert!(app.files.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_automatic_commit_keeps_the_message_and_staged_changes_for_retry() {
         use std::os::unix::fs::PermissionsExt;
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
-        git(dir.path(), &["add", "."]);
         let hook = repo.git_dir.join("hooks/pre-commit");
         std::fs::write(
             &hook,

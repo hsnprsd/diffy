@@ -19,8 +19,9 @@ Ratatui, Tree-sitter, and native filesystem notifications.
   in `$EDITOR`, then return to diffy when the editor exits. Opens at the first
   visible hunk in the Diff pane, or the file's first hunk in the Files pane.
 - **Stage and commit:** press `Space` to stage/unstage a whole file or an individual
-  hunk, then `c` to write a commit message in a popup. Only staged changes are
-  committed; unstaged edits stay on disk.
+  hunk, then `c` to write a commit message in a popup. Commits include only staged
+  changes when anything is staged; otherwise, all changes are staged and committed,
+  including untracked files but excluding ignored files.
 - **Pull and push:** `p` fast-forwards the current branch from its upstream; `P`
   pushes only the current branch. Commands run in the background with live output
   and a scrollable details popup. Completed commands show past-tense
@@ -79,7 +80,7 @@ against the index's “ours” stage.
 | `Enter` | Focus the diff |
 | `j` / `k`, `↓` / `↑` | Select files in the Files pane; scroll in the Diff pane |
 | `Space` | Stage an unstaged entry / unstage a staged entry: whole file in Files, first visible hunk in Diff |
-| `c` | Open the commit-message popup for staged changes |
+| `c` | Open the commit-message popup (staged changes, or all changes if nothing is staged) |
 | `p` / `P` | Pull (fast-forward only) / push the current branch |
 | `Esc` | Cancel a running commit, pull, or push; close its output after completion |
 | `e` | Open in `$EDITOR` at the first visible hunk (Diff pane) or first file hunk (Files pane) |
@@ -115,14 +116,20 @@ when its staging state changes.
 - Previews without text hunks, conflicts, and submodules must be staged/unstaged
   as whole files from the Files pane.
 
-Press **`c`** to open a commit-message popup when there are staged changes. Type
+Press **`c`** to open a commit-message popup when there are changes. Type
 or paste a message; **`Enter`** inserts a newline, **`Ctrl+S`** commits, and
 **`Esc`** cancels. Arrow keys, Home/End, Backspace/Delete, and Unicode text are
 supported; **`Ctrl+U`** clears the message. Commit failures (including rejected
 hooks) open the output/details popup and preserve the message. Cancelling a
 running commit also preserves its draft. Press **`Esc`** after completion to
 return to the message, edit, and retry.
-Commits use the current index without staging any additional working-tree edits.
+If anything is staged when you submit, only the current index is committed;
+additional working-tree edits stay unstaged. If nothing is staged, all changes
+throughout the repository are staged and committed automatically, including new
+untracked files and deletions, but excluding ignored files. There is no additional
+warning or confirmation. Opening or cancelling the message popup does not stage
+anything. If staging fails, the commit is not attempted; if a hook rejects the
+commit, the staged changes remain available for retry.
 
 ### Pull and push the current branch
 
@@ -232,7 +239,8 @@ bundled highlighting queries, diff hunks, keyboard navigation, editor commands
 and visible-hunk line mapping, small terminal layouts, filesystem/index/ref
 notifications, and CLI errors. Staging/commit tests cover whole files, individual
 hunks, stale previews, unusual paths, CRLF/missing newlines, Unicode message
-editing, commit-hook failures/retries, and preserving unstaged edits. Push/pull
+editing, automatic whole-repository commits when nothing is staged, ignored files,
+staging failures, commit-hook failures/retries, and preserving unstaged edits. Push/pull
 tests use isolated local bare remotes, covering first-push tracking, explicit
 current-branch refspecs, fast-forwards, divergence, and detached HEAD errors.
 Operation tests cover live hook output before completion, concurrent pipe draining

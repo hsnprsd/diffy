@@ -435,7 +435,7 @@ fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool) 
         width,
         height,
     );
-    let block = pane(" Commit staged changes ".into(), true);
+    let block = pane(" Commit changes ".into(), true);
     let inner = block.inner(rect);
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
@@ -474,13 +474,9 @@ fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool) 
         chunks[1],
     );
     frame.render_widget(
-        Paragraph::new(
-            popup
-                .error
-                .as_deref()
-                .map(safe_text)
-                .unwrap_or_else(|| "Only staged changes will be committed".into()),
-        )
+        Paragraph::new(popup.error.as_deref().map(safe_text).unwrap_or_else(|| {
+            "Commits staged changes, or all changes if nothing is staged".into()
+        }))
         .style(Style::default().fg(if popup.error.is_some() { RED } else { MUTED })),
         chunks[2],
     );
@@ -511,7 +507,7 @@ fn help(frame: &mut Frame, area: Rect) {
         Line::raw("j/k or ↑/↓          Select files / scroll diff"),
         Line::raw("Enter               Focus the diff"),
         Line::raw("Space               Stage/unstage file (Files) or hunk (Diff)"),
-        Line::raw("c                   Commit staged changes (message popup)"),
+        Line::raw("c                   Commit changes (message popup)"),
         Line::raw("p / P               Pull (fast-forward only) / push branch"),
         Line::raw("e                   Edit in $EDITOR at first (visible) hunk"),
         Line::raw("PgUp/PgDn or u/d    Page up / down"),
@@ -720,7 +716,8 @@ mod tests {
         app.handle_paste("Commit 界\n\nMessage body");
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("Commit staged changes"));
+        assert!(text.contains("Commit changes"));
+        assert!(text.contains("Commits staged changes, or all changes if nothing is staged"));
         assert!(text.contains("Commit 界"));
         assert!(text.contains("Message body"));
         assert!(text.contains("Ctrl+S commit"));
