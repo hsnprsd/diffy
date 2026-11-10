@@ -13,10 +13,8 @@ Ratatui, Tree-sitter, and native filesystem notifications.
   with fixed gutters, and a compact single-pane layout for narrow terminals.
 - **Black dark theme:** true-black panes, subtle charcoal panels, and colored diff
   highlights.
-- **Unified changes view and branch comparison:** inspect staged and unstaged
-  changes together, or a merge-request-style diff against another branch. Supports
-  local/remote-tracking refs, detached HEADs, and linked worktrees; the changes view
-  also works on unborn branches.
+- **Unified changes view:** inspect staged and unstaged changes together.
+  Supports detached HEADs, linked worktrees, and unborn branches.
 - **Open in your editor:** press `e` in either pane to open the working-tree file
   in `$EDITOR`, then return to diffy when the editor exits. Opens at the first
   visible hunk in the Diff pane, or the file's first hunk in the Files pane.
@@ -55,18 +53,15 @@ runtime language-server setup are needed. The terminal controls the font;
 ```sh
 diffy                       # Repository containing the current directory
 diffy /path/to/repository   # A repository or a directory/file inside it
-diffy --base main           # Committed changes since diverging from main
-diffy -b origin/main /repo  # Compare against a local remote-tracking ref
 diffy --help
 ```
 
-### What each view compares
+### What the changes view compares
 
-| View / entry | Before | After |
+| Entry | Before | After |
 | --- | --- | --- |
-| Changes (default), `[ ]` unstaged | Git index | Files on disk, including untracked files |
-| Changes, `[x]` staged | HEAD (empty on an unborn branch) | Git index |
-| Branch (`--base REF` or `b`) | Merge base of REF and HEAD | HEAD |
+| `[ ]` unstaged | Git index | Files on disk, including untracked files |
+| `[x]` staged | HEAD (empty on an unborn branch) | Git index |
 
 **Changes** lists staged and unstaged entries together, sorted by path. A partially
 staged file has two adjacent entries, with separate diffs and staging controls:
@@ -74,35 +69,6 @@ staged file has two adjacent entries, with separate diffs and staging controls:
 shows the selected entry's staging state. Renames are intentionally displayed as
 deletion/addition pairs. Unmerged files appear once, showing conflict markers
 against the index's “ours” stage.
-
-### Compare against another branch
-
-```sh
-diffy --base main
-diffy --base=origin/main
-```
-
-This shows the same committed changes as `git diff main...HEAD`: changes on the
-current branch **since the branches diverged**, not changes made only on `main`.
-Staged, unstaged, and untracked changes are excluded. The base branch and HEAD
-must have a common ancestor, and HEAD must have at least one commit.
-
-Press **`b`** to select or change the base branch without restarting. Browse local
-and remote-tracking branches with **`↑`/`↓`** (or `Tab`/`Shift+Tab`), then press
-**`Enter`** to compare. Type to filter the list (case-insensitive); `Ctrl+U` clears
-the filter, and `Esc` cancels. The current base is highlighted when reopening the
-picker. You can still enter another ref, such as a tag or commit, when no branches
-match. Invalid refs leave the previous view intact. After a base is selected,
-**`s`** switches between Changes and Branch; `b` jumps directly to Branch after
-confirming a selection. Without a selected base, `s` stays in Changes.
-
-Both revisions are pinned for each refresh so a moving branch cannot mix a file
-list from one commit with a preview from another. Watching recomputes the
-comparison automatically when HEAD or the base ref changes. If the base ref
-disappears, the last snapshot remains visible with an error. Remote
-branches such as `origin/main` use existing local refs: selecting a base never
-checks out a branch or fetches updates. Use `p` to pull the current branch (which
-fetches from its upstream), or fetch other remotes outside diffy when needed.
 
 ### Keyboard shortcuts
 
@@ -120,8 +86,6 @@ fetches from its upstream), or fetch other remotes outside diffy when needed.
 | `PageUp` / `PageDown`, `u` / `d` | Page up / down |
 | `Home` / `End`, `g` / `G` | First / last row or file |
 | `[` / `]` | Previous / next hunk |
-| `s` | Switch changes / branch views (branch requires a selected base) |
-| `b` | Select the base branch from a searchable list and open the branch comparison |
 | `?` / `F1` | Help (any key closes it) |
 | `q` / `Ctrl+C` | Quit |
 
@@ -135,8 +99,8 @@ Below 80 columns, only the focused pane is shown; `←` / `→` or `Tab` switche
 ### Stage, unstage, and commit
 
 In **Changes**, press **`Space`** on an unstaged (`[ ]`) entry to stage changes,
-or on a staged (`[x]`) entry to unstage them. No view switch is needed. The
-selection stays on the same file when its staging state changes.
+or on a staged (`[x]`) entry to unstage them. The selection stays on the same file
+when its staging state changes.
 
 - In the **Files pane**, `Space` acts on the entire selected file, including
   additions, deletions, binary files, and mode changes.
@@ -149,7 +113,7 @@ selection stays on the same file when its staging state changes.
   acting on an outdated hunk. Added/deleted files have a single hunk covering all
   their text and use whole-file staging/unstaging.
 - Previews without text hunks, conflicts, and submodules must be staged/unstaged
-  as whole files from the Files pane. Branch comparisons are read-only.
+  as whole files from the Files pane.
 
 Press **`c`** to open a commit-message popup when there are staged changes. Type
 or paste a message; **`Enter`** inserts a newline, **`Ctrl+S`** commits, and
@@ -220,8 +184,8 @@ Vim/Neovim, nano, Emacs, and other `+LINE` editors are supported, along with Hel
 VS Code/VSCodium, Sublime Text, and Zed. The latter GUI editors receive `--wait`
 automatically; configure any other GUI editor to stay in the foreground.
 
-Editing always opens the **file on disk**, including from staged entries and Branch;
-line numbers may differ if disk contents have changed since that revision. Missing
+Editing always opens the **file on disk**, including from staged entries;
+line numbers may differ if disk contents have changed since staging. Missing
 files (including deleted files) and directories cannot be opened.
 
 ## Highlighting
@@ -237,8 +201,8 @@ stops, and line wrapping keeps wide Unicode characters intact.
 - Binary/non-UTF-8 files, submodules, and special files show a notice instead of a
   text diff. Previews are limited to **2 MiB and 40,000 lines per revision** to
   keep the terminal responsive. Mode-only changes show a metadata notice.
-- Bare repositories and arbitrary two-revision ranges are not supported. Branch
-  comparisons require a common ancestor; shallow clones may need more history.
+- Only working-tree and index changes are shown; bare repositories and committed
+  revision comparisons are not supported.
 - The viewer compares raw Git blobs with disk contents; Git clean/smudge filters
   and textconv transformations are not applied to previews or partial hunk
   staging. Whole-file staging uses `git add` and respects Git's filters.
@@ -266,10 +230,7 @@ entries, staging-aware selection on refresh, conflicts, binary/large files,
 unusual paths, submodules, linked worktrees, all
 bundled highlighting queries, diff hunks, keyboard navigation, editor commands
 and visible-hunk line mapping, small terminal layouts, filesystem/index/ref
-notifications, and CLI errors. Branch tests cover
-merge-base semantics, exclusion of uncommitted changes, immutable snapshots,
-remote-tracking refs, missing/unrelated history, comparison-mode navigation, and
-branch selection/filtering. Staging/commit tests cover whole files, individual
+notifications, and CLI errors. Staging/commit tests cover whole files, individual
 hunks, stale previews, unusual paths, CRLF/missing newlines, Unicode message
 editing, commit-hook failures/retries, and preserving unstaged edits. Push/pull
 tests use isolated local bare remotes, covering first-push tracking, explicit

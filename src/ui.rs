@@ -11,9 +11,9 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, BranchPicker, CommitPopup, Focus, Status},
+    app::{App, CommitPopup, Focus, Status},
     diff::{DiffRow, RowKind, WrappedRow},
-    git::{Mode, safe_text},
+    git::safe_text,
     highlight::TEXT,
     operation::{OperationDetails, OperationResult},
 };
@@ -36,7 +36,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         area,
     );
     let chunks = Layout::vertical([
-        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -61,36 +60,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ]);
     frame.render_widget(Paragraph::new(header), chunks[0]);
 
-    let mut tabs = vec![
-        Span::styled(" [s] ", Style::default().fg(MUTED)),
-        Span::styled(
-            "Changes",
-            if app.mode == Mode::Changes {
-                Style::default().fg(ACCENT).bold()
-            } else {
-                Style::default().fg(MUTED)
-            },
-        ),
-    ];
-    tabs.push(Span::raw("  ·  "));
-    tabs.push(Span::styled("[b] ", Style::default().fg(MUTED)));
-    tabs.push(Span::styled(
-        app.base_branch.as_ref().map_or_else(
-            || "Compare branch".into(),
-            |base| format!("Branch {}...HEAD", safe_text(base)),
-        ),
-        if app.mode.is_branch() {
-            Style::default().fg(ACCENT).bold()
-        } else {
-            Style::default().fg(MUTED)
-        },
-    ));
-    frame.render_widget(
-        Paragraph::new(Line::from(tabs)).style(Style::default().bg(PANEL)),
-        chunks[1],
-    );
-
-    let body = chunks[2];
+    let body = chunks[1];
     if body.width >= 80 {
         let sidebar = (body.width / 4).clamp(24, 42);
         let panes =
@@ -124,17 +94,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         )
     } else {
         Line::styled(
-            " Space stage/unstage · c commit · p pull · P push · b base · s view · e edit · ? help · q quit",
+            " Space stage/unstage · c commit · p pull · P push · e edit · ? help · q quit",
             Style::default().fg(MUTED),
         )
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().bg(PANEL)),
-        chunks[3],
+        chunks[2],
     );
-    if let Some(picker) = &mut app.branch_picker {
-        branch_picker(frame, area, picker);
-    }
     if let Some(popup) = &app.commit_popup {
         commit_popup(frame, area, popup, app.operation_label().is_some());
     }
@@ -157,17 +124,15 @@ fn pane(title: String, focused: bool) -> Block<'static> {
 }
 
 fn files(frame: &mut Frame, app: &mut App, area: Rect) {
-    let mut block = pane(
+    let block = pane(
         format!(" Files {} ", app.files.len()),
         app.focus == Focus::Files,
-    );
-    if !app.mode.is_branch() {
-        block = block.title_bottom(if app.selected().is_some_and(|entry| entry.staged) {
-            " Space unstage file "
-        } else {
-            " Space stage file "
-        });
-    }
+    )
+    .title_bottom(if app.selected().is_some_and(|entry| entry.staged) {
+        " Space unstage file "
+    } else {
+        " Space stage file "
+    });
     let inner = block.inner(area);
     let items: Vec<ListItem> = app
         .files
@@ -178,13 +143,10 @@ fn files(frame: &mut Frame, app: &mut App, area: Rect) {
                 'D' | 'U' => RED,
                 _ => ACCENT,
             };
-            let mut spans = Vec::new();
-            if !app.mode.is_branch() {
-                spans.push(Span::styled(
-                    if entry.staged { "[x] " } else { "[ ] " },
-                    Style::default().fg(if entry.staged { GREEN } else { MUTED }),
-                ));
-            }
+            let mut spans = vec![Span::styled(
+                if entry.staged { "[x] " } else { "[ ] " },
+                Style::default().fg(if entry.staged { GREEN } else { MUTED }),
+            )];
             spans.push(Span::styled(
                 format!("{} ", entry.status),
                 Style::default().fg(color),
@@ -211,16 +173,12 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
         .selected()
         .map(|entry| {
             let path = safe_text(&entry.path.to_string_lossy());
-            if app.mode.is_branch() {
-                path
-            } else {
-                format!(
-                    "{path} · {}",
-                    if entry.staged { "Staged" } else { "Unstaged" }
-                )
-            }
+            format!(
+                "{path} · {}",
+                if entry.staged { "Staged" } else { "Unstaged" }
+            )
         })
-        .unwrap_or_else(|| app.mode.label().into());
+        .unwrap_or_else(|| "Changes".into());
     let block = pane(format!(" {title} "), app.focus == Focus::Diff);
     let inner = block.inner(area);
     app.resize_diff(inner.width as usize, inner.height as usize);
@@ -245,16 +203,14 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(RED),
         ),
     ]);
-    if !app.mode.is_branch() {
-        summary.spans.push(Span::styled(
-            if app.selected().is_some_and(|entry| entry.staged) {
-                "· Space unstage hunk "
-            } else {
-                "· Space stage hunk "
-            },
-            Style::default().fg(MUTED),
-        ));
-    }
+    summary.spans.push(Span::styled(
+        if app.selected().is_some_and(|entry| entry.staged) {
+            "· Space unstage hunk "
+        } else {
+            "· Space stage hunk "
+        },
+        Style::default().fg(MUTED),
+    ));
     frame.render_widget(block.title_bottom(summary), area);
     let rows: Vec<Line> = app
         .view
@@ -365,81 +321,6 @@ fn clip_spans(spans: &[Span<'_>], offset: usize, width: usize) -> Vec<Span<'stat
         }
     }
     result
-}
-
-fn branch_picker(frame: &mut Frame, area: Rect, picker: &mut BranchPicker) {
-    let width = area.width.saturating_sub(4).min(76);
-    let height = area.height.saturating_sub(2).min(18);
-    let popup = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
-        width,
-        height,
-    );
-    let block = pane(" Base branch ".into(), true).title_bottom(format!(
-        " {}/{} branches ",
-        picker.visible.len(),
-        picker.branches.len()
-    ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .split(inner);
-    frame.render_widget(
-        Paragraph::new("Merge base → HEAD: committed changes since divergence"),
-        chunks[0],
-    );
-    let input = safe_text(&picker.input);
-    let available = chunks[1].width.saturating_sub(3) as usize;
-    let offset = input.width().saturating_sub(available);
-    let visible = clip_spans(&[Span::raw(input.clone())], offset, available);
-    let mut field = vec![Span::styled("> ", Style::default().fg(ACCENT))];
-    field.extend(visible);
-    frame.render_widget(Paragraph::new(Line::from(field)), chunks[1]);
-    let items: Vec<ListItem> = picker
-        .visible
-        .iter()
-        .map(|&index| ListItem::new(safe_text(&picker.branches[index])))
-        .collect();
-    let list = List::new(items)
-        .highlight_symbol("▸ ")
-        .highlight_style(Style::default().bg(HUNK_BG).add_modifier(Modifier::BOLD));
-    frame.render_stateful_widget(list, chunks[2], &mut picker.list_state);
-    if picker.visible.is_empty() {
-        frame.render_widget(
-            Paragraph::new("No matching branches — type a ref, then Enter")
-                .style(Style::default().fg(MUTED)),
-            chunks[2],
-        );
-    }
-    frame.render_widget(
-        Paragraph::new("↑/↓ select · Type to filter · Enter compare · Esc cancel")
-            .style(Style::default().fg(ACCENT)),
-        chunks[3],
-    );
-    frame.render_widget(
-        Paragraph::new(
-            picker
-                .error
-                .as_deref()
-                .map(safe_text)
-                .unwrap_or_else(|| "Ctrl+U clear · Local/remote refs; no checkout or fetch".into()),
-        )
-        .style(Style::default().fg(if picker.error.is_some() { RED } else { MUTED })),
-        chunks[4],
-    );
-    if chunks[1].width > 0 && chunks[1].height > 0 {
-        let x = (2 + input.width().saturating_sub(offset))
-            .min(chunks[1].width.saturating_sub(1) as usize);
-        frame.set_cursor_position((chunks[1].x + x as u16, chunks[1].y));
-    }
 }
 
 fn operation_details(frame: &mut Frame, area: Rect, details: &mut OperationDetails) {
@@ -636,8 +517,6 @@ fn help(frame: &mut Frame, area: Rect) {
         Line::raw("PgUp/PgDn or u/d    Page up / down"),
         Line::raw("Home/End or g/G     First / last row or file"),
         Line::raw("[ / ]               Previous / next hunk"),
-        Line::raw("s                   Switch changes / branch comparison"),
-        Line::raw("b                   Switch base branch (type to filter)"),
         Line::raw("? / F1              Show help"),
         Line::raw("q / Ctrl+C          Quit"),
         Line::raw(""),
@@ -647,10 +526,6 @@ fn help(frame: &mut Frame, area: Rect) {
         ),
         Line::styled(
             "Partially staged files have both entries. Renames = delete/add.",
-            Style::default().fg(MUTED),
-        ),
-        Line::styled(
-            "Branch = merge base → HEAD (committed changes only).",
             Style::default().fg(MUTED),
         ),
         Line::styled(
@@ -689,13 +564,13 @@ mod tests {
     #[test]
     fn renders_black_theme_and_navigation_help() {
         let (_dir, repo) = repo();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(119, 0)].bg, Color::Rgb(0, 0, 0));
         assert_eq!(buffer[(1, 5)].bg, Color::Rgb(0, 0, 0));
-        assert_eq!(buffer[(119, 1)].bg, PANEL);
+        assert_eq!(buffer[(119, 1)].bg, BG);
         assert_eq!(buffer[(119, 29)].bg, PANEL);
         let text = screen(&terminal);
         assert!(text.contains("Files 0"));
@@ -753,11 +628,11 @@ mod tests {
             format!("{}TAIL\nEND\n", "a".repeat(90)),
         )
         .unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.focus = Focus::Diff;
         let mut terminal = Terminal::new(TestBackend::new(29, 9)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert_eq!(app.viewport_height, 4);
+        assert_eq!(app.viewport_height, 5);
         assert_eq!(app.view.wrapped_rows.len(), 8);
         let text = screen(&terminal);
         assert!(text.contains("   1 │ + aaaaaaaaaaaaaaaaaa"));
@@ -771,7 +646,7 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert_eq!(app.scroll, 4);
+        assert_eq!(app.scroll, 3);
         let text = screen(&terminal);
         assert!(text.contains("     │   TAIL"));
         assert!(text.contains("   2 │ + END"));
@@ -792,66 +667,11 @@ mod tests {
     }
 
     #[test]
-    fn branch_mode_and_searchable_picker_are_visible() {
-        let (dir, repo) = crate::git::tests::diverged_repo();
-        git(
-            dir.path(),
-            &["update-ref", "refs/remotes/origin/main", "main"],
-        );
-        let mut app = App::new(repo, Some("main".into())).unwrap();
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert!(screen(&terminal).contains("Branch main...HEAD"));
-        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let text = screen(&terminal);
-        assert!(text.contains("Base branch"));
-        assert!(text.contains("▸ main"));
-        assert!(text.contains("origin/main"));
-        assert!(text.contains("3/3 branches"));
-        assert!(text.contains("Type to filter"));
-        assert!(text.contains("committed changes since divergence"));
-        for ch in "ori".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
-        }
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let text = screen(&terminal);
-        assert!(text.contains("> ori"));
-        assert!(text.contains("▸ origin/main"));
-        assert!(text.contains("1/3 branches"));
-        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let text = screen(&terminal);
-        assert!(text.contains("No matching branches"));
-        assert!(text.contains("Cannot resolve"));
-    }
-
-    #[test]
-    fn branch_picker_scrolls_to_keep_the_selection_visible() {
-        let (dir, repo) = crate::git::tests::diverged_repo();
-        for index in 0..30 {
-            git(dir.path(), &["branch", &format!("topic/{index:02}")]);
-        }
-        let mut app = App::new(repo, None).unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-        for (width, height) in [(80, 24), (40, 12)] {
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-            assert!(screen(&terminal).contains("▸ topic/29"));
-            app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-            assert!(screen(&terminal).contains("▸ feature"));
-        }
-    }
-
-    #[test]
     fn diff_scrolling_keeps_editor_at_the_hunk_start_after_resize() {
         let (dir, repo) = repo();
         let content: String = (1..=30).map(|n| format!("line {n}\n")).collect();
         std::fs::write(dir.path().join("test.txt"), content).unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.focus = Focus::Diff;
         for _ in 0..15 {
             app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -873,11 +693,11 @@ mod tests {
         std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
         git(dir.path(), &["add", "."]);
         std::fs::write(dir.path().join("file.txt"), "unstaged\n").unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("[s] Changes  ·  [b] Compare branch"));
+        assert!(text.contains("Files 2"));
         assert!(text.contains("[ ] M file.txt"));
         assert!(text.contains("[x] A file.txt"));
         assert!(text.contains("file.txt · Unstaged"));
@@ -887,7 +707,6 @@ mod tests {
             "c commit",
             "p pull",
             "P push",
-            "b base",
         ] {
             assert!(text.contains(hint), "Missing hint: {hint}");
         }
@@ -913,7 +732,7 @@ mod tests {
     #[test]
     fn commit_popup_scrolls_and_renders_at_tiny_sizes() {
         let (_dir, repo) = repo();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.commit_popup = Some(CommitPopup::default());
         app.handle_paste(&format!("{}last row 界", "long 界 line\n".repeat(50)));
         for (width, height) in [(120, 30), (40, 12), (10, 4), (1, 1)] {
@@ -930,7 +749,7 @@ mod tests {
     #[test]
     fn operation_results_are_visible_in_the_footer_and_details() {
         let (_dir, repo) = repo();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         let mut details = OperationDetails::new(&crate::git::Operation::Push);
         details.success_message = "Pushed to origin (refs/heads/main)".into();
         app.operation_details = Some(details);
@@ -978,7 +797,7 @@ mod tests {
     #[test]
     fn operation_details_scroll_escape_controls_and_render_at_tiny_sizes() {
         let (_dir, repo) = repo();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         let mut details = OperationDetails::new(&crate::git::Operation::Push);
         details.success_message = "Pushed to origin (refs/heads/main)".into();
         for n in 0..100 {
@@ -1026,7 +845,7 @@ mod tests {
     fn renders_diff_and_help_at_different_sizes() {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         for (width, height) in [(120, 30), (80, 24), (40, 12), (10, 4), (1, 1)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             for focus in [Focus::Files, Focus::Diff] {
@@ -1040,12 +859,6 @@ mod tests {
                 app.show_help = true;
                 terminal.draw(|frame| draw(frame, &mut app)).unwrap();
                 app.show_help = false;
-                app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-                let picker = app.branch_picker.as_mut().unwrap();
-                picker.input = "very-long/界/branch/".repeat(20);
-                picker.error = Some("Cannot resolve revision".into());
-                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-                app.branch_picker = None;
             }
         }
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();

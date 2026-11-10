@@ -25,21 +25,18 @@ use crate::{app::App, git::Repository, watch::Watcher};
 
 fn main() -> Result<()> {
     let mut path = None;
-    let mut base_branch = None;
     let mut positional = false;
-    let mut args = env::args_os().skip(1);
-    while let Some(arg) = args.next() {
+    for arg in env::args_os().skip(1) {
         if !positional && (arg == "--help" || arg == "-h") {
             println!(
                 "diffy — live Git diffs with Tree-sitter highlighting\n\n\
-                 Usage: diffy [--base BRANCH] [PATH]\n\n\
+                 Usage: diffy [PATH]\n\n\
                  PATH defaults to the current directory; subdirectories are accepted.\n\
-                 --base, -b REF Compare merge-base(REF, HEAD) to HEAD (committed only)\n\n\
                  Staged and unstaged changes appear together in the Changes view.\n\
                  Updates automatically when repository files or refs change.\n\
-                 Keys: ←/→/Tab focus · ↑/↓/j/k move · s changes/branch view\n\
+                 Keys: ←/→/Tab focus · ↑/↓/j/k move\n\
                        Space stage/unstage file or hunk · c commit · p pull · P push\n\
-                       e edit in $EDITOR · b select base branch · [/] hunks · ? help · q quit\n\n\
+                       e edit in $EDITOR · [/] hunks · ? help · q quit\n\n\
                  Git output opens automatically: ↑/↓ or PgUp/PgDn scroll · Esc cancel running / close completed.\n\
                  Commit popup: Ctrl+S commit · Enter newline · Esc cancel.\n\
                  Pull is fast-forward only. Staging/unstaging never changes working-tree files."
@@ -48,27 +45,6 @@ fn main() -> Result<()> {
         } else if !positional && (arg == "--version" || arg == "-V") {
             println!("diffy {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
-        } else if !positional
-            && (arg == "--base"
-                || arg == "-b"
-                || arg
-                    .to_str()
-                    .is_some_and(|value| value.starts_with("--base=")))
-        {
-            let value = match arg.to_str().and_then(|value| value.strip_prefix("--base=")) {
-                Some(value) => value.to_owned(),
-                None => args
-                    .next()
-                    .context("Expected a branch after --base. See diffy --help")?
-                    .into_string()
-                    .map_err(|_| anyhow::anyhow!("Base branch must be UTF-8. See diffy --help"))?,
-            };
-            if value.trim().is_empty() || value.starts_with('-') {
-                bail!("Expected a branch after --base. See diffy --help");
-            }
-            if base_branch.replace(value).is_some() {
-                bail!("Expected at most one --base branch. See diffy --help");
-            }
         } else if !positional && arg == "--" {
             positional = true;
         } else if !positional && arg.to_string_lossy().starts_with('-') {
@@ -82,7 +58,7 @@ fn main() -> Result<()> {
         bail!("An interactive terminal is required. See diffy --help");
     }
     let mut watcher = Watcher::new(&repo).context("Could not watch repository")?;
-    let mut app = App::new(repo, base_branch)?;
+    let mut app = App::new(repo)?;
 
     // Ratatui's panic hook and this guard both restore the terminal on exit.
     let _restore = RestoreTerminal;

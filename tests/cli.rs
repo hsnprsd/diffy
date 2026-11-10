@@ -21,7 +21,7 @@ fn help_describes_automatic_updates_and_pane_navigation() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("Staged and unstaged changes appear together"));
-    assert!(help.contains("s changes/branch view"));
+    assert!(help.contains("Usage: diffy [PATH]"));
     assert!(help.contains("Updates automatically"));
     assert!(help.contains("←/→/Tab focus"));
     assert!(help.contains("↑/↓/j/k move"));
@@ -36,15 +36,7 @@ fn help_describes_automatic_updates_and_pane_navigation() {
 
 #[test]
 fn invalid_arguments_fail_before_starting_the_ui() {
-    for args in [
-        vec!["--invalid"],
-        vec!["first", "second"],
-        vec!["--base"],
-        vec!["-b"],
-        vec!["--base="],
-        vec!["--base", "--no-watch"],
-        vec!["--base", "main", "--base", "other"],
-    ] {
+    for args in [vec!["--invalid"], vec!["first", "second"]] {
         let output = diffy().args(args).output().unwrap();
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
@@ -62,17 +54,19 @@ fn missing_repository_has_an_actionable_error() {
 }
 
 #[test]
-fn base_option_accepts_separate_short_and_equals_forms() {
-    for args in [
-        vec!["--base", "main", "--help"],
-        vec!["-b", "origin/main", "--help"],
-        vec!["--base=main", "--help"],
+fn removed_base_options_report_an_unknown_option() {
+    for (args, option) in [
+        (vec!["--base", "main", "--help"], "--base"),
+        (vec!["-b", "origin/main", "--help"], "-b"),
+        (vec!["--base=main", "--help"], "--base=main"),
     ] {
         let output = diffy().args(args).output().unwrap();
-        assert!(output.status.success());
-        let help = String::from_utf8_lossy(&output.stdout);
-        assert!(help.contains("--base BRANCH"));
-        assert!(help.contains("committed only"));
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            format!("Error: Unknown option {option}. See diffy --help")
+        );
     }
 }
 

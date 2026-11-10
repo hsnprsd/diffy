@@ -7,7 +7,7 @@ use ratatui::widgets::ListState;
 use crate::{
     diff::DiffView,
     editor::EditRequest,
-    git::{Content, FileEntry, Mode, Operation, Repository},
+    git::{Content, FileEntry, Operation, Repository},
     highlight::SyntaxHighlighter,
     operation::{self, OperationDetails, OperationEvent, OperationHandle, OperationResult},
 };
@@ -16,66 +16,6 @@ use crate::{
 pub enum Focus {
     Files,
     Diff,
-}
-
-pub struct BranchPicker {
-    pub input: String,
-    pub branches: Vec<String>,
-    pub visible: Vec<usize>,
-    pub list_state: ListState,
-    pub error: Option<String>,
-}
-
-impl BranchPicker {
-    fn new(branches: Vec<String>, selected: Option<&str>) -> Self {
-        let position = branches
-            .iter()
-            .position(|branch| Some(branch.as_str()) == selected);
-        let mut picker = Self {
-            input: String::new(),
-            visible: (0..branches.len()).collect(),
-            branches,
-            list_state: ListState::default(),
-            error: None,
-        };
-        picker
-            .list_state
-            .select(position.or_else(|| (!picker.visible.is_empty()).then_some(0)));
-        picker
-    }
-
-    pub fn selected(&self) -> Option<&str> {
-        self.list_state
-            .selected()
-            .and_then(|selected| self.visible.get(selected))
-            .map(|&index| self.branches[index].as_str())
-    }
-
-    fn filter(&mut self) {
-        let needle = self.input.trim().to_lowercase();
-        self.visible = self
-            .branches
-            .iter()
-            .enumerate()
-            .filter(|(_, branch)| branch.to_lowercase().contains(&needle))
-            .map(|(index, _)| index)
-            .collect();
-        self.list_state
-            .select((!self.visible.is_empty()).then_some(0));
-        self.error = None;
-    }
-
-    fn move_selection(&mut self, delta: isize) {
-        if !self.visible.is_empty() {
-            let next = self
-                .list_state
-                .selected()
-                .unwrap_or(0)
-                .saturating_add_signed(delta)
-                .min(self.visible.len() - 1);
-            self.list_state.select(Some(next));
-        }
-    }
 }
 
 #[derive(Default)]
@@ -182,10 +122,7 @@ impl Status {
 
 pub struct App {
     pub repo: Repository,
-    pub mode: Mode,
     pub branch: String,
-    pub base_branch: Option<String>,
-    pub branch_picker: Option<BranchPicker>,
     pub commit_popup: Option<CommitPopup>,
     pub status: Option<Status>,
     pending: Option<OperationHandle>,
@@ -205,20 +142,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(repo: Repository, base_branch: Option<String>) -> Result<Self> {
+    pub fn new(repo: Repository) -> Result<Self> {
         let branch = repo.branch()?;
-        let mode = match &base_branch {
-            Some(target) => repo.compare_branch(target)?,
-            None => Mode::Changes,
-        };
-        let files = repo.files(mode.clone())?;
+        let files = repo.files()?;
         let mut app = Self {
             repo,
             branch,
             files,
-            mode,
-            base_branch,
-            branch_picker: None,
             commit_popup: None,
             status: None,
             pending: None,
@@ -247,32 +177,20 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
-        let result = (|| {
-            let mode = if self.mode.is_branch() {
-                self.repo.compare_branch(
-                    self.base_branch
-                        .as_deref()
-                        .context("No base branch selected")?,
-                )?
-            } else {
-                self.mode.clone()
-            };
-            self.update(mode, false)
-        })();
+        let result = self.update();
         if let Err(error) = result {
             self.error = Some(format!("Refresh: {error:#}; showing last snapshot"));
         }
     }
 
-    fn update(&mut self, mode: Mode, reset_scroll: bool) -> Result<()> {
-        // Read everything before replacing state, so failed comparisons keep the old view intact.
+    fn update(&mut self) -> Result<()> {
+        // Read everything before replacing state, so a failed refresh keeps the old view intact.
         let branch = self.repo.branch()?;
-        let files = self.repo.files(mode.clone())?;
+        let files = self.repo.files()?;
         let selected = self
             .selected()
             .map(|entry| (entry.path.clone(), entry.staged));
         self.branch = branch;
-        self.mode = mode;
         self.files = files;
         self.error = None;
         let position = selected.as_ref().and_then(|(path, staged)| {
@@ -284,9 +202,8 @@ impl App {
         });
         self.list_state
             .select(position.or_else(|| (!self.files.is_empty()).then_some(0)));
-        if reset_scroll
-            || self.selected().map(|entry| (&entry.path, entry.staged))
-                != selected.as_ref().map(|(path, staged)| (path, *staged))
+        if self.selected().map(|entry| (&entry.path, entry.staged))
+            != selected.as_ref().map(|(path, staged)| (path, *staged))
         {
             self.scroll = 0;
         }
@@ -294,38 +211,16 @@ impl App {
         Ok(())
     }
 
-    pub fn compare_with(&mut self, target: &str) -> Result<()> {
-        let mode = self.repo.compare_branch(target)?;
-        self.update(mode, true)?;
-        self.base_branch = Some(target.to_owned());
-        Ok(())
-    }
-
-    fn cycle_mode(&mut self) -> Result<()> {
-        let mode = match &self.mode {
-            Mode::Changes => match &self.base_branch {
-                Some(target) => self.repo.compare_branch(target)?,
-                None => return Ok(()),
-            },
-            Mode::Branch { .. } => Mode::Changes,
-        };
-        self.update(mode, true)
-    }
-
     fn load_selected(&mut self) {
         let Some(entry) = self.selected().cloned() else {
-            self.view = DiffView::notice(if self.mode.is_branch() {
-                "No committed changes since the merge base"
-            } else {
-                "No changes — working tree/index is clean"
-            });
+            self.view = DiffView::notice("No changes — working tree/index is clean");
             self.scroll = 0;
             self.view.wrap(self.viewport_width);
             return;
         };
         match self
             .repo
-            .contents(&entry, self.mode.clone())
+            .contents(&entry)
             .and_then(|(old, new)| DiffView::build(&entry.path, old, new, &mut self.highlighter))
         {
             Ok(view) => self.view = view,
@@ -397,16 +292,12 @@ impl App {
 
     fn toggle_stage(&mut self) -> Result<()> {
         self.ensure_idle()?;
-        anyhow::ensure!(
-            !self.mode.is_branch(),
-            "Branch comparisons are read-only; press s to switch to Changes"
-        );
         let Some(entry) = self.selected() else {
             return Ok(());
         };
         let staged = entry.staged;
         if self.focus == Focus::Files {
-            self.repo.toggle_file(entry, &self.mode)?;
+            self.repo.toggle_file(entry)?;
         } else {
             let patch = self.view.patches.get(self.active_hunk()).context(
                 "No text hunk to stage/unstage; use Space in the Files pane for the whole file",
@@ -414,7 +305,7 @@ impl App {
             let expected = self.view.source.as_ref().context("No text preview")?;
             let current = self
                 .repo
-                .files(self.mode.clone())?
+                .files()?
                 .into_iter()
                 .find(|current| current.path == entry.path && current.staged == entry.staged)
                 .context("This file has changed; wait for the live refresh and try again")?;
@@ -422,12 +313,12 @@ impl App {
                 current.status == entry.status && current.submodule == entry.submodule,
                 "This file has changed; wait for the live refresh and try again"
             );
-            let (old, new) = self.repo.contents(&current, self.mode.clone())?;
+            let (old, new) = self.repo.contents(&current)?;
             anyhow::ensure!(
                 matches!((&old, &new), (Content::Text(old), Content::Text(new)) if (old, new) == (&expected.0, &expected.1)),
                 "This hunk has changed; wait for the live refresh and try again"
             );
-            self.repo.toggle_hunk(entry, &self.mode, patch)?;
+            self.repo.toggle_hunk(entry, patch)?;
         }
         self.status = Some(Status::Success(
             if staged {
@@ -545,11 +436,6 @@ impl App {
                 .filter(|ch| !ch.is_control() || *ch == '\n' || *ch == '\t')
                 .collect();
             popup.insert(&text);
-        } else if let Some(picker) = &mut self.branch_picker {
-            picker
-                .input
-                .extend(text.chars().filter(|ch| !ch.is_control()));
-            picker.filter();
         }
     }
 
@@ -710,42 +596,6 @@ impl App {
             }
             return false;
         }
-        if let Some(picker) = &mut self.branch_picker {
-            match key.code {
-                KeyCode::Esc => self.branch_picker = None,
-                KeyCode::Enter => {
-                    let target = picker.selected().unwrap_or(picker.input.trim()).to_owned();
-                    match self.compare_with(&target) {
-                        Ok(()) => self.branch_picker = None,
-                        Err(error) => {
-                            self.branch_picker.as_mut().unwrap().error = Some(format!("{error:#}"));
-                        }
-                    }
-                }
-                KeyCode::Down | KeyCode::Tab => picker.move_selection(1),
-                KeyCode::Up | KeyCode::BackTab => picker.move_selection(-1),
-                KeyCode::Home => picker.move_selection(-isize::MAX),
-                KeyCode::End => picker.move_selection(isize::MAX),
-                KeyCode::Backspace => {
-                    picker.input.pop();
-                    picker.filter();
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    picker.input.clear();
-                    picker.filter();
-                }
-                KeyCode::Char(ch)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    picker.input.push(ch);
-                    picker.filter();
-                }
-                _ => {}
-            }
-            return false;
-        }
         match key.code {
             KeyCode::Char('q') => {
                 if let Err(error) = self.ensure_idle() {
@@ -797,18 +647,6 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.vertical(isize::MAX),
             KeyCode::Char(']') => self.hunk(true),
             KeyCode::Char('[') => self.hunk(false),
-            KeyCode::Char('s') => {
-                if let Err(error) = self.cycle_mode() {
-                    self.error = Some(format!("Compare: {error:#}"));
-                }
-            }
-            KeyCode::Char('b') => match self.repo.branches() {
-                Ok(branches) => {
-                    self.branch_picker =
-                        Some(BranchPicker::new(branches, self.base_branch.as_deref()));
-                }
-                Err(error) => self.error = Some(format!("Branches: {error:#}")),
-            },
             _ => {}
         }
         false
@@ -820,7 +658,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::git::tests::{diverged_repo, git, repo};
+    use crate::git::tests::{git, repo};
 
     fn key(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
@@ -832,7 +670,7 @@ mod tests {
         let content = format!("{}\n", "x".repeat(120)).repeat(30);
         std::fs::write(dir.path().join("a.txt"), content).unwrap();
         std::fs::write(dir.path().join("b.txt"), "other\n").unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.scroll = 2;
         let selected = app.selected().unwrap().path.clone();
         for (code, focus) in [
@@ -852,15 +690,30 @@ mod tests {
     }
 
     #[test]
-    fn pane_arrows_do_not_interrupt_branch_picker() {
-        let (_dir, repo) = diverged_repo();
-        let mut app = App::new(repo, None).unwrap();
-        app.handle_key(key('b'));
-        for code in [KeyCode::Right, KeyCode::Left] {
-            assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
-            assert!(app.branch_picker.is_some());
+    fn former_comparison_keys_preserve_changes_and_navigation() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        std::fs::write(dir.path().join("file.txt"), "unstaged\n").unwrap();
+        let mut app = App::new(repo).unwrap();
+        let source = app.view.source.clone();
+        for ch in ['b', 's'] {
+            assert!(!app.handle_key(key(ch)));
+            assert_eq!(app.files.len(), 2);
+            assert_eq!(app.selected().unwrap().path, PathBuf::from("file.txt"));
+            assert_eq!(app.view.source, source);
+            app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            assert!(app.focus == Focus::Diff);
+            app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
             assert!(app.focus == Focus::Files);
         }
+        app.handle_key(key(' '));
+        assert_eq!(app.files.len(), 1);
+        assert!(app.selected().unwrap().staged);
+        assert_eq!(
+            crate::git::tests::text(app.repo.contents(app.selected().unwrap()).unwrap().1),
+            "unstaged\n"
+        );
     }
 
     #[test]
@@ -869,7 +722,7 @@ mod tests {
         let content = "line\n".repeat(30);
         std::fs::write(dir.path().join("a.txt"), &content).unwrap();
         std::fs::write(dir.path().join("b.txt"), &content).unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         for (code, path) in [
             (KeyCode::Down, "b.txt"),
             (KeyCode::Up, "a.txt"),
@@ -902,7 +755,7 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "first file\n").unwrap();
         let content = format!("{}\n", "x".repeat(120)).repeat(30);
         std::fs::write(dir.path().join("b.txt"), content).unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.scroll = 2;
         std::fs::write(dir.path().join("0.txt"), "new file\n").unwrap();
@@ -932,7 +785,7 @@ mod tests {
             new = new.replace(&format!("line {line}\n"), &format!("changed {line}\n"));
         }
         std::fs::write(dir.path().join("a file.txt"), new).unwrap();
-        (dir, App::new(repo, None).unwrap())
+        (dir, App::new(repo).unwrap())
     }
 
     #[test]
@@ -988,8 +841,7 @@ mod tests {
         app.handle_key(key(' '));
         let staged = app.repo.staged_files().unwrap();
         assert_eq!(staged.len(), 1);
-        let contents =
-            crate::git::tests::text(app.repo.contents(&staged[0], Mode::Changes).unwrap().1);
+        let contents = crate::git::tests::text(app.repo.contents(&staged[0]).unwrap().1);
         assert_eq!(contents, expected);
     }
 
@@ -1001,7 +853,7 @@ mod tests {
             format!("{}\n", "x".repeat(150)),
         )
         .unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.resize_diff(24, 3);
         app.scroll = 5;
         let anchor = app.view.wrapped_rows[app.scroll];
@@ -1103,7 +955,7 @@ mod tests {
         std::fs::write(dir.path().join("test.txt"), "gone").unwrap();
         git(dir.path(), &["add", "."]);
         std::fs::write(dir.path().join("test.txt"), "").unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         assert!(!app.view.hunks.is_empty());
         assert!(app.view.rows.iter().all(|row| row.new_line.is_none()));
         for focus in [Focus::Files, Focus::Diff] {
@@ -1120,9 +972,9 @@ mod tests {
     }
 
     #[test]
-    fn edit_shortcut_respects_help_branch_input_and_empty_file_lists() {
+    fn edit_shortcut_respects_help_and_empty_file_lists() {
         let (dir, repo) = repo();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.handle_key(key('e'));
         assert!(app.edit_request.is_none());
         std::fs::write(dir.path().join("test.txt"), "test\n").unwrap();
@@ -1131,203 +983,50 @@ mod tests {
         app.handle_key(key('e'));
         assert!(!app.show_help);
         assert!(app.edit_request.is_none());
-        app.handle_key(key('b'));
         app.handle_key(key('e'));
-        assert_eq!(app.branch_picker.as_ref().unwrap().input, "e");
-        assert!(app.edit_request.is_none());
-    }
-
-    #[test]
-    fn branch_picker_validates_cancels_and_applies_without_changing_checkout() {
-        let (_dir, repo) = diverged_repo();
-        let mut app = App::new(repo, None).unwrap();
-        app.handle_key(key('b'));
-        for ch in "missing".chars() {
-            app.handle_key(key(ch));
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            app.branch_picker
-                .as_ref()
-                .unwrap()
-                .error
-                .as_ref()
-                .unwrap()
-                .contains("Cannot resolve")
-        );
-        assert_eq!(app.mode, Mode::Changes);
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.branch_picker.is_none());
-        app.handle_key(key('b'));
-        for ch in "main".chars() {
-            app.handle_key(key(ch));
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.branch_picker.is_none());
-        assert!(app.mode.is_branch());
-        assert_eq!(app.base_branch.as_deref(), Some("main"));
-        assert_eq!(app.repo.branch().unwrap(), "feature");
-        assert_eq!(app.files.len(), 3);
-        app.handle_key(key('s'));
-        assert_eq!(app.mode, Mode::Changes);
-        app.handle_key(key('s'));
-        assert!(app.mode.is_branch());
-        let mode = app.mode.clone();
-        assert!(app.compare_with("missing").is_err());
-        assert_eq!(app.mode, mode);
-        assert_eq!(app.base_branch.as_deref(), Some("main"));
-    }
-
-    #[test]
-    fn branch_picker_selects_without_typing_and_remembers_the_base() {
-        let (_dir, repo) = diverged_repo();
-        let mut app = App::new(repo, None).unwrap();
-        app.handle_key(key('b'));
-        let picker = app.branch_picker.as_ref().unwrap();
-        assert_eq!(picker.input, "");
-        assert_eq!(picker.selected(), Some("feature"));
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.branch_picker.as_ref().unwrap().selected(), Some("main"));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.branch_picker.is_none());
-        assert!(app.mode.is_branch());
-        assert_eq!(app.base_branch.as_deref(), Some("main"));
-        assert_eq!(app.repo.branch().unwrap(), "feature");
-        assert_eq!(app.files.len(), 3);
-        app.handle_key(key('b'));
-        assert_eq!(app.branch_picker.as_ref().unwrap().selected(), Some("main"));
-        assert_eq!(app.branch_picker.as_ref().unwrap().input, "");
-        for code in [KeyCode::Up, KeyCode::Up, KeyCode::End, KeyCode::Home] {
-            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
-        }
         assert_eq!(
-            app.branch_picker.as_ref().unwrap().selected(),
-            Some("feature")
-        );
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.base_branch.as_deref(), Some("main"));
-    }
-
-    #[test]
-    fn branch_picker_filters_remote_and_unicode_names_and_reloads_on_open() {
-        let (dir, repo) = diverged_repo();
-        git(
-            dir.path(),
-            &["update-ref", "refs/remotes/origin/main", "main"],
-        );
-        let mut app = App::new(repo, None).unwrap();
-        app.handle_key(key('b'));
-        for ch in "ORIGIN/MA".chars() {
-            app.handle_key(key(ch));
-        }
-        let picker = app.branch_picker.as_ref().unwrap();
-        assert_eq!(picker.visible.len(), 1);
-        assert_eq!(picker.selected(), Some("origin/main"));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.base_branch.as_deref(), Some("origin/main"));
-        assert_eq!(app.repo.branch().unwrap(), "feature");
-        git(dir.path(), &["branch", "fix/界"]);
-        app.handle_key(key('b'));
-        assert_eq!(
-            app.branch_picker.as_ref().unwrap().selected(),
-            Some("origin/main")
-        );
-        app.handle_key(key('界'));
-        assert_eq!(
-            app.branch_picker.as_ref().unwrap().selected(),
-            Some("fix/界")
-        );
-        app.handle_key(key('x'));
-        assert!(app.branch_picker.as_ref().unwrap().visible.is_empty());
-        assert!(app.branch_picker.as_ref().unwrap().selected().is_none());
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(
-            app.branch_picker.as_ref().unwrap().selected(),
-            Some("fix/界")
-        );
-        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        assert_eq!(app.branch_picker.as_ref().unwrap().visible.len(), 4);
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(
-            app.branch_picker.as_ref().unwrap().selected(),
-            Some("fix/界")
-        );
-        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(
-            app.branch_picker.as_ref().unwrap().selected(),
-            Some("feature")
+            app.edit_request.take(),
+            Some(EditRequest {
+                path: PathBuf::from("test.txt"),
+                line: Some(1),
+            })
         );
     }
 
     #[test]
-    fn branch_picker_keeps_manual_refs_and_failed_selections_safe() {
-        let (dir, repo) = diverged_repo();
-        git(dir.path(), &["tag", "v1", "main"]);
-        let mut app = App::new(repo, None).unwrap();
-        app.handle_key(key('b'));
-        for ch in "v1".chars() {
-            app.handle_key(key(ch));
-        }
-        assert!(app.branch_picker.as_ref().unwrap().visible.is_empty());
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.base_branch.as_deref(), Some("v1"));
-        let mode = app.mode.clone();
-        app.handle_key(key('b'));
-        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        git(dir.path(), &["branch", "-D", "main"]);
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.branch_picker.as_ref().unwrap().error.is_some());
-        assert_eq!(app.mode, mode);
-        assert_eq!(app.base_branch.as_deref(), Some("v1"));
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        app.handle_key(key('b'));
-        assert_eq!(app.branch_picker.as_ref().unwrap().branches, ["feature"]);
-    }
-
-    #[test]
-    fn empty_branch_picker_is_safe_and_reports_an_empty_ref() {
-        let (_dir, repo) = repo();
-        let mut app = App::new(repo, None).unwrap();
-        app.handle_key(key('b'));
-        for code in [
-            KeyCode::Up,
-            KeyCode::Down,
-            KeyCode::Home,
-            KeyCode::End,
-            KeyCode::Enter,
-        ] {
-            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
-        }
-        let picker = app.branch_picker.as_ref().unwrap();
-        assert!(picker.visible.is_empty());
-        assert!(picker.selected().is_none());
-        assert!(
-            picker
-                .error
-                .as_ref()
-                .unwrap()
-                .contains("Enter a base branch")
-        );
-        assert_eq!(app.mode, Mode::Changes);
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.branch_picker.is_none());
-    }
-
-    #[test]
-    fn branch_refresh_tracks_commits_and_base_changes_and_retains_failed_snapshot() {
-        let (dir, repo) = diverged_repo();
-        let mut app = App::new(repo, Some("main".into())).unwrap();
-        std::fs::write(dir.path().join("later.rs"), "fn later() {}\n").unwrap();
-        app.refresh();
-        assert_eq!(app.files.len(), 3); // Untracked files must not leak into the branch view.
+    fn refresh_tracks_commits_and_branch_changes() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("file.txt"), "initial\n").unwrap();
+        let mut app = App::new(repo).unwrap();
+        assert_eq!(app.files.len(), 1);
         git(dir.path(), &["add", "."]);
-        git(dir.path(), &["commit", "-qm", "Later"]);
+        git(dir.path(), &["commit", "-qm", "Initial"]);
+        git(dir.path(), &["checkout", "-qb", "feature"]);
         app.refresh();
-        assert_eq!(app.files.len(), 4);
-        let mode = app.mode.clone();
-        git(dir.path(), &["branch", "-D", "main"]);
+        assert_eq!(app.branch, "feature");
+        assert!(app.files.is_empty());
+        assert_eq!(
+            app.view.rows[0].spans[0].content,
+            "No changes — working tree/index is clean"
+        );
+        std::fs::write(dir.path().join("file.txt"), "changed\n").unwrap();
+        app.refresh();
+        assert_eq!(app.files.len(), 1);
+        assert_eq!(
+            app.view.source,
+            Some(("initial\n".into(), "changed\n".into()))
+        );
+    }
+
+    #[test]
+    fn failed_refresh_preserves_the_last_snapshot_and_recovers() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("file.txt"), "snapshot\n").unwrap();
+        let mut app = App::new(repo).unwrap();
+        let source = app.view.source.clone();
+        let git_dir = dir.path().join(".git");
+        let backup = dir.path().join("git-backup");
+        std::fs::rename(&git_dir, &backup).unwrap();
         app.refresh();
         assert!(
             app.error
@@ -1335,46 +1034,14 @@ mod tests {
                 .unwrap()
                 .contains("showing last snapshot")
         );
-        assert_eq!(app.mode, mode);
-        assert_eq!(app.files.len(), 4);
-        git(dir.path(), &["branch", "main", "HEAD"]);
+        assert_eq!(app.files.len(), 1);
+        assert_eq!(app.selected().unwrap().path, PathBuf::from("file.txt"));
+        assert_eq!(app.view.source, source);
+        std::fs::rename(backup, git_dir).unwrap();
+        std::fs::write(dir.path().join("file.txt"), "recovered\n").unwrap();
         app.refresh();
         assert!(app.error.is_none());
-        assert!(app.files.is_empty());
-        assert!(
-            app.view.rows[0].spans[0]
-                .content
-                .contains("No committed changes")
-        );
-    }
-
-    #[test]
-    fn failed_mode_switch_keeps_the_previous_mode() {
-        let (dir, repo) = diverged_repo();
-        let mut app = App::new(repo, Some("main".into())).unwrap();
-        app.handle_key(key('s'));
-        assert_eq!(app.mode, Mode::Changes);
-        git(dir.path(), &["branch", "-D", "main"]);
-        app.handle_key(key('s'));
-        assert_eq!(app.mode, Mode::Changes);
-        assert!(app.error.is_some());
-    }
-
-    #[test]
-    fn branch_input_does_not_interpret_shortcuts() {
-        let (_dir, repo) = diverged_repo();
-        let mut app = App::new(repo, None).unwrap();
-        app.handle_key(key('b'));
-        for ch in "qs?j/k".chars() {
-            assert!(!app.handle_key(key(ch)));
-        }
-        assert_eq!(app.branch_picker.as_ref().unwrap().input, "qs?j/k");
-        assert_eq!(app.mode, Mode::Changes);
-        assert!(!app.show_help);
-        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        assert_eq!(app.branch_picker.as_ref().unwrap().input, "");
-        assert_eq!(app.branch_picker.as_ref().unwrap().visible.len(), 2);
-        assert!(app.branch_picker.as_ref().unwrap().error.is_none());
+        assert_eq!(app.view.source, Some(("".into(), "recovered\n".into())));
     }
 
     fn wait_for_operation(app: &mut App) {
@@ -1418,7 +1085,6 @@ mod tests {
         app.handle_key(key(' '));
         assert!(app.error.is_none(), "{:?}", app.error);
         assert_eq!(app.files.len(), 1);
-        assert_eq!(app.mode, Mode::Changes);
         assert!(app.selected().unwrap().staged);
         assert_eq!(app.view.hunks.len(), 1); // New file on an unborn branch.
         app.handle_key(key(' '));
@@ -1426,10 +1092,6 @@ mod tests {
         assert!(!app.selected().unwrap().staged);
         assert!(app.repo.staged_files().unwrap().is_empty());
         assert_eq!(std::fs::read_to_string(path).unwrap(), working);
-        // Without a base branch, s leaves the combined view unchanged.
-        app.handle_key(key('s'));
-        assert_eq!(app.mode, Mode::Changes);
-        assert_eq!(app.files.len(), 1);
     }
 
     #[test]
@@ -1449,8 +1111,7 @@ mod tests {
         assert_eq!(app.files.len(), 2);
         assert!(!app.selected().unwrap().staged);
         let staged = app.repo.staged_files().unwrap();
-        let staged_text =
-            crate::git::tests::text(app.repo.contents(&staged[0], Mode::Changes).unwrap().1);
+        let staged_text = crate::git::tests::text(app.repo.contents(&staged[0]).unwrap().1);
         assert!(staged_text.contains("changed 50\n"));
         assert!(!staged_text.contains("changed 10\n"));
         assert!(!staged_text.contains("changed 80\n"));
@@ -1476,8 +1137,7 @@ mod tests {
         assert!(app.selected().unwrap().staged);
         assert_eq!(app.view.hunks.len(), 2);
         let staged = app.repo.staged_files().unwrap();
-        let staged_text =
-            crate::git::tests::text(app.repo.contents(&staged[0], Mode::Changes).unwrap().1);
+        let staged_text = crate::git::tests::text(app.repo.contents(&staged[0]).unwrap().1);
         assert!(staged_text.contains("changed 10\n"));
         assert!(!staged_text.contains("changed 50\n"));
         assert!(staged_text.contains("changed 80\n"));
@@ -1554,9 +1214,9 @@ mod tests {
     }
 
     #[test]
-    fn space_respects_notices_branch_comparisons_and_empty_lists() {
+    fn space_respects_notices_and_empty_lists() {
         let (dir, repo) = repo();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.handle_key(key(' '));
         assert!(app.error.is_none());
         app.handle_key(key('c'));
@@ -1571,14 +1231,6 @@ mod tests {
         app.focus = Focus::Files;
         app.handle_key(key(' '));
         assert_eq!(app.repo.staged_files().unwrap().len(), 1);
-        let (_dir, repo) = diverged_repo();
-        let mut app = App::new(repo, Some("main".into())).unwrap();
-        for focus in [Focus::Files, Focus::Diff] {
-            app.focus = focus;
-            app.handle_key(key(' '));
-            assert!(app.error.as_ref().unwrap().contains("read-only"));
-            assert!(app.repo.staged_files().unwrap().is_empty());
-        }
     }
 
     #[test]
@@ -1587,7 +1239,7 @@ mod tests {
         std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
         git(dir.path(), &["add", "."]);
         std::fs::write(dir.path().join("file.txt"), "unstaged\n").unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.handle_key(key('c'));
         app.handle_paste("Cancelled message");
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1607,7 +1259,7 @@ mod tests {
         for ch in "qb pPe?s".chars() {
             assert!(!app.handle_key(key(ch)));
         }
-        assert!(app.branch_picker.is_none());
+        assert_eq!(app.commit_popup.as_ref().unwrap().message, "qb pPe?s");
         assert!(app.edit_request.is_none());
         assert!(!app.show_help);
         assert!(app.operation_label().is_none());
@@ -1626,7 +1278,7 @@ mod tests {
         assert!(app.repo.staged_files().unwrap().is_empty());
         assert_eq!(app.files.len(), 1);
         assert_eq!(
-            crate::git::tests::text(app.repo.contents(&app.files[0], Mode::Changes).unwrap().0),
+            crate::git::tests::text(app.repo.contents(&app.files[0]).unwrap().0),
             "staged\n"
         );
         assert_eq!(
@@ -1675,7 +1327,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.handle_key(key('c'));
         app.handle_paste("Keep this message");
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
@@ -1708,7 +1360,7 @@ mod tests {
     fn push_and_pull_keys_run_in_background_and_block_conflicting_actions() {
         let (dir, _remote, repo) = crate::git::tests::connected_repo();
         git(dir.path(), &["commit", "--allow-empty", "-qm", "Later"]);
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.handle_key(key('P'));
         assert_eq!(app.operation_label(), Some("Pushing"));
         assert!(!app.handle_key(key('q')));
@@ -1744,7 +1396,7 @@ mod tests {
     fn command_failures_remain_visible_after_filesystem_refreshes() {
         let (dir, repo) = repo();
         git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.handle_key(key('p')); // No remote/upstream has been configured.
         wait_for_operation(&mut app);
         let error = app.error.clone().unwrap();
@@ -1763,7 +1415,7 @@ mod tests {
         let hook = repo.git_dir.join("hooks/pre-commit");
         std::fs::write(&hook, "#!/bin/sh\nprintf 'live stdout 界\\n'\nprintf 'live stderr\\n' >&2\ni=0\nwhile [ $i -lt 250 ]; do\n  [ -f .git/release-hook ] && exit 0\n  sleep 0.02\n  i=$((i + 1))\ndone\nexit 1\n").unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.handle_key(key('c'));
         app.handle_paste("Live commit");
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
@@ -1807,7 +1459,7 @@ mod tests {
         let hook = repo.git_dir.join("hooks/pre-commit");
         std::fs::write(&hook, "#!/bin/sh\nprintf 'hook waiting\\n'\nsleep 30\n").unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         app.handle_key(key('c'));
         app.handle_paste("Keep this draft 界\n\nBody");
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
@@ -1881,7 +1533,7 @@ mod tests {
         );
 
         for shortcut in ['p', 'P'] {
-            let mut app = App::new(repo.clone(), None).unwrap();
+            let mut app = App::new(repo.clone()).unwrap();
             app.handle_key(key(shortcut));
             wait_for_output(&mut app, &["transport waiting"]);
             app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1903,7 +1555,7 @@ mod tests {
     #[test]
     fn operation_polling_is_bounded_and_worker_disconnects_are_reported() {
         let (_dir, repo) = repo();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
         app.pending = Some(OperationHandle {
             events: receiver,
@@ -1945,7 +1597,7 @@ mod tests {
     #[test]
     fn empty_repository_and_help_are_safe() {
         let (_dir, repo) = repo();
-        let mut app = App::new(repo, None).unwrap();
+        let mut app = App::new(repo).unwrap();
         for ch in ['j', 'k', 'G', 'g', '[', ']', 'l', 'h', 's'] {
             assert!(!app.handle_key(key(ch)));
         }

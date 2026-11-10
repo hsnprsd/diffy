@@ -101,7 +101,7 @@ fn git_metadata(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::tests::{diverged_repo, git, repo};
+    use crate::git::tests::{git, repo};
     use notify::event::{AccessKind, ModifyKind};
 
     fn wait_for_change(watcher: &mut Watcher) {
@@ -149,16 +149,13 @@ mod tests {
     }
 
     #[test]
-    fn detects_base_branch_ref_updates_without_checkout() {
-        let (dir, repo) = diverged_repo();
+    fn detects_commits_and_packed_refs() {
+        let (dir, repo) = repo();
         let mut watcher = Watcher::new(&repo).unwrap();
-        git(dir.path(), &["update-ref", "refs/heads/main", "HEAD"]);
+        git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
         wait_for_change(&mut watcher);
-        assert!(
-            repo.files(repo.compare_branch("main").unwrap())
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(repo.branch().unwrap(), "main");
+        assert!(repo.files().unwrap().is_empty());
         git(dir.path(), &["pack-refs", "--all"]);
         wait_for_change(&mut watcher);
     }

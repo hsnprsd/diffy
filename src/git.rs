@@ -11,30 +11,6 @@ use anyhow::{Context, Result, bail};
 
 pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum Mode {
-    #[default]
-    Changes,
-    // Pin both revisions so the file list and previews always use the same commits.
-    Branch {
-        merge_base: String,
-        head: String,
-    },
-}
-
-impl Mode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Changes => "Changes",
-            Self::Branch { .. } => "Branch",
-        }
-    }
-
-    pub fn is_branch(&self) -> bool {
-        matches!(self, Self::Branch { .. })
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct FileEntry {
     pub path: PathBuf,
@@ -136,75 +112,25 @@ impl Repository {
         ))
     }
 
-    pub fn branches(&self) -> Result<Vec<String>> {
-        let output = self.output(&[
-            "for-each-ref",
-            "--sort=refname",
-            "--format=%(refname:short)%00%(symref)",
-            "refs/heads/",
-            "refs/remotes/",
-        ])?;
-        ensure_success(&output)?;
-        let refs = std::str::from_utf8(&output.stdout).context("Branch names must be UTF-8")?;
-        Ok(refs
-            .lines()
-            .filter_map(|line| {
-                let (name, symbolic) = line.split_once('\0')?;
-                symbolic.is_empty().then(|| name.to_owned())
-            })
-            .collect())
-    }
-
-    pub fn compare_branch(&self, target: &str) -> Result<Mode> {
-        anyhow::ensure!(
-            !target.is_empty(),
-            "Enter a base branch, e.g. main or origin/main"
+    pub fn files(&self) -> Result<Vec<FileEntry>> {
+        let mut files = self.unstaged_files()?;
+        // Conflicts are not staged changes; show their working-tree preview only.
+        files.extend(
+            self.staged_files()?
+                .into_iter()
+                .filter(|entry| entry.status != 'U'),
         );
-        let resolve = |revision: &str| -> Result<String> {
-            let commit = format!("{revision}^{{commit}}");
-            let output = self.output(&["rev-parse", "--verify", "--end-of-options", &commit])?;
-            ensure_success(&output)
-                .with_context(|| format!("Cannot resolve revision {revision:?}"))?;
-            Ok(std::str::from_utf8(trim_newline(&output.stdout))?.to_owned())
-        };
-        let target_commit = resolve(target)?;
-        let head =
-            resolve("HEAD").context("Branch comparison requires at least one commit on HEAD")?;
-        let output = self.output(&["merge-base", &target_commit, &head])?;
-        if output.status.code() == Some(1) {
-            bail!(
-                "No common ancestor between {target:?} and HEAD (history may be unrelated or shallow)"
-            );
-        }
-        ensure_success(&output)?;
-        let merge_base = std::str::from_utf8(trim_newline(&output.stdout))?.to_owned();
-        Ok(Mode::Branch { merge_base, head })
-    }
-
-    pub fn files(&self, mode: Mode) -> Result<Vec<FileEntry>> {
-        match mode {
-            Mode::Changes => {
-                let mut files = self.unstaged_files()?;
-                // Conflicts are not staged changes; show their working-tree preview only.
-                files.extend(
-                    self.staged_files()?
-                        .into_iter()
-                        .filter(|entry| entry.status != 'U'),
-                );
-                files.sort_by(|a, b| (&a.path, a.staged).cmp(&(&b.path, b.staged)));
-                Ok(files)
-            }
-            Mode::Branch { merge_base, head } => self.diff_files(&[&merge_base, &head], false),
-        }
+        files.sort_by(|a, b| (&a.path, a.staged).cmp(&(&b.path, b.staged)));
+        Ok(files)
     }
 
     pub fn staged_files(&self) -> Result<Vec<FileEntry>> {
-        self.diff_files(&["--cached"], true)
+        self.diff_files(true)
     }
 
     fn unstaged_files(&self) -> Result<Vec<FileEntry>> {
         let mut files: BTreeMap<_, _> = self
-            .diff_files(&[], false)?
+            .diff_files(false)?
             .into_iter()
             .map(|entry| (entry.path.clone(), entry))
             .collect();
@@ -226,7 +152,7 @@ impl Repository {
         Ok(files.into_values().collect())
     }
 
-    fn diff_files(&self, revisions: &[&str], staged: bool) -> Result<Vec<FileEntry>> {
+    fn diff_files(&self, staged: bool) -> Result<Vec<FileEntry>> {
         // NUL-delimited paths preserve spaces, newlines, and non-UTF-8 filenames.
         // Disabling renames also makes each side independently inspectable.
         let mut args = vec![
@@ -238,7 +164,9 @@ impl Repository {
             "--raw",
             "-z",
         ];
-        args.extend_from_slice(revisions);
+        if staged {
+            args.push("--cached");
+        }
         args.push("--");
         let output = self.output(&args)?;
         ensure_success(&output)?;
@@ -275,14 +203,14 @@ impl Repository {
         Ok(files.into_values().collect())
     }
 
-    pub fn contents(&self, entry: &FileEntry, mode: Mode) -> Result<(Content, Content)> {
+    pub fn contents(&self, entry: &FileEntry) -> Result<(Content, Content)> {
         if entry.submodule {
             return Ok((
                 Content::Notice("Submodule — inspect changes inside its repository"),
                 Content::empty(),
             ));
         }
-        if entry.status == 'U' && entry.staged && !mode.is_branch() {
+        if entry.status == 'U' && entry.staged {
             return Ok((
                 Content::Notice("Unmerged index — inspect conflict markers in Changes"),
                 Content::empty(),
@@ -291,32 +219,27 @@ impl Repository {
         let old = if matches!(entry.status, 'A' | '?') {
             Content::empty()
         } else {
-            let revision = match &mode {
-                Mode::Changes if entry.staged => "HEAD:".to_owned(),
-                Mode::Changes if entry.status == 'U' => ":2:".to_owned(),
-                Mode::Changes => ":".to_owned(),
-                Mode::Branch { merge_base, .. } => format!("{merge_base}:"),
+            let revision = if entry.staged {
+                "HEAD:"
+            } else if entry.status == 'U' {
+                ":2:"
+            } else {
+                ":"
             };
-            self.blob(&revision, &entry.path)?
+            self.blob(revision, &entry.path)?
         };
         let new = if entry.status == 'D' {
             Content::empty()
+        } else if entry.staged {
+            self.blob(":", &entry.path)?
         } else {
-            match mode {
-                Mode::Changes if entry.staged => self.blob(":", &entry.path)?,
-                Mode::Changes => self.worktree_file(&entry.path)?,
-                Mode::Branch { head, .. } => self.blob(&format!("{head}:"), &entry.path)?,
-            }
+            self.worktree_file(&entry.path)?
         };
         Ok((old, new))
     }
 
-    pub fn toggle_file(&self, entry: &FileEntry, mode: &Mode) -> Result<()> {
+    pub fn toggle_file(&self, entry: &FileEntry) -> Result<()> {
         let mut cmd = command(&self.root);
-        anyhow::ensure!(
-            !mode.is_branch(),
-            "Switch to Changes to stage/unstage changes"
-        );
         if entry.staged {
             // Reset also works on unborn branches and never changes files on disk.
             cmd.args(["reset", "-q"]);
@@ -327,15 +250,14 @@ impl Repository {
         ensure_success(&output)
     }
 
-    pub fn toggle_hunk(&self, entry: &FileEntry, mode: &Mode, hunk: &str) -> Result<()> {
-        anyhow::ensure!(!mode.is_branch(), "Branch comparisons are read-only");
+    pub fn toggle_hunk(&self, entry: &FileEntry, hunk: &str) -> Result<()> {
         anyhow::ensure!(
             entry.status != 'U' && !entry.submodule,
             "Use the Files pane to stage/unstage conflicts or submodules as a whole"
         );
         // Added/deleted files contain exactly one hunk, covering their entire contents.
         if matches!(entry.status, 'A' | '?' | 'D') {
-            return self.toggle_file(entry, mode);
+            return self.toggle_file(entry);
         }
         let patch = format!(
             "--- {}\n+++ {}\n{hunk}",
@@ -647,27 +569,6 @@ pub mod tests {
         (dir, repo)
     }
 
-    pub fn diverged_repo() -> (TempDir, Repository) {
-        let (dir, repo) = repo();
-        fs::write(dir.path().join("changed.rs"), "fn base() {}\n").unwrap();
-        fs::write(dir.path().join("deleted.rs"), "removed\n").unwrap();
-        git(dir.path(), &["add", "."]);
-        git(dir.path(), &["commit", "-qm", "Base"]);
-        git(dir.path(), &["checkout", "-qb", "feature"]);
-        fs::write(dir.path().join("changed.rs"), "fn feature() {}\n").unwrap();
-        fs::write(dir.path().join("added.rs"), "fn added() {}\n").unwrap();
-        fs::remove_file(dir.path().join("deleted.rs")).unwrap();
-        git(dir.path(), &["add", "."]);
-        git(dir.path(), &["commit", "-qm", "Feature"]);
-        git(dir.path(), &["checkout", "-q", "main"]);
-        fs::write(dir.path().join("changed.rs"), "fn upstream() {}\n").unwrap();
-        fs::write(dir.path().join("upstream.rs"), "upstream only\n").unwrap();
-        git(dir.path(), &["add", "."]);
-        git(dir.path(), &["commit", "-qm", "Upstream"]);
-        git(dir.path(), &["checkout", "-q", "feature"]);
-        (dir, repo)
-    }
-
     pub fn text(content: Content) -> String {
         match content {
             Content::Text(text) => text,
@@ -683,14 +584,14 @@ pub mod tests {
         fs::write(dir.path().join("ignored"), "ignore me").unwrap();
         assert_eq!(repo.branch().unwrap(), "main");
         assert!(repo.staged_files().unwrap().is_empty());
-        assert_eq!(repo.files(Mode::Changes).unwrap().len(), 2);
+        assert_eq!(repo.files().unwrap().len(), 2);
         git(dir.path(), &["add", "new.rs"]);
-        let files = repo.files(Mode::Changes).unwrap();
+        let files = repo.files().unwrap();
         assert_eq!(files.len(), 2);
         assert!(!files[0].staged);
         assert!(files[1].staged);
         assert_eq!(files[1].status, 'A');
-        let (old, new) = repo.contents(&files[1], Mode::Changes).unwrap();
+        let (old, new) = repo.contents(&files[1]).unwrap();
         assert_eq!(text(old), "");
         assert_eq!(text(new), "fn main() {}\n");
     }
@@ -705,7 +606,7 @@ pub mod tests {
         fs::write(&path, "staged\n").unwrap();
         git(dir.path(), &["add", "."]);
         fs::write(&path, "working\n").unwrap();
-        let files = repo.files(Mode::Changes).unwrap();
+        let files = repo.files().unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].path, files[1].path);
         for (entry, (staged, before, after)) in files.iter().zip([
@@ -713,17 +614,17 @@ pub mod tests {
             (true, "original\n", "staged\n"),
         ]) {
             assert_eq!(entry.staged, staged);
-            let (old, new) = repo.contents(entry, Mode::Changes).unwrap();
+            let (old, new) = repo.contents(entry).unwrap();
             assert_eq!((text(old), text(new)), (before.into(), after.into()));
         }
         // Opposing edits must remain visible even when disk matches HEAD.
         fs::write(&path, "original\n").unwrap();
-        assert_eq!(repo.files(Mode::Changes).unwrap().len(), 2);
+        assert_eq!(repo.files().unwrap().len(), 2);
         fs::remove_file(path).unwrap();
-        let files = repo.files(Mode::Changes).unwrap();
+        let files = repo.files().unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].status, 'D');
-        assert_eq!(text(repo.contents(&files[0], Mode::Changes).unwrap().1), "");
+        assert_eq!(text(repo.contents(&files[0]).unwrap().1), "");
     }
 
     #[test]
@@ -741,7 +642,7 @@ pub mod tests {
         fs::write(dir.path().join("c.txt"), "original\n").unwrap();
         fs::write(dir.path().join("z.txt"), "untracked\n").unwrap();
 
-        let files = repo.files(Mode::Changes).unwrap();
+        let files = repo.files().unwrap();
         let entries: Vec<_> = files
             .iter()
             .map(|entry| (entry.path.to_str().unwrap(), entry.status, entry.staged))
@@ -760,7 +661,7 @@ pub mod tests {
             .iter()
             .zip([("", "original\n"), ("original\n", "")])
         {
-            let (old, new) = repo.contents(entry, Mode::Changes).unwrap();
+            let (old, new) = repo.contents(entry).unwrap();
             assert_eq!((text(old), text(new)), (before.into(), after.into()));
         }
     }
@@ -770,9 +671,9 @@ pub mod tests {
         let (dir, repo) = repo();
         fs::write(dir.path().join("binary"), [0, 1, 2]).unwrap();
         fs::write(dir.path().join("large"), vec![b'a'; MAX_FILE_BYTES + 1]).unwrap();
-        for entry in repo.files(Mode::Changes).unwrap() {
+        for entry in repo.files().unwrap() {
             assert!(matches!(
-                repo.contents(&entry, Mode::Changes).unwrap().1,
+                repo.contents(&entry).unwrap().1,
                 Content::Notice(_)
             ));
         }
@@ -792,7 +693,6 @@ pub mod tests {
         assert_eq!(repo.root, path.canonicalize().unwrap());
         assert_ne!(repo.git_dir, repo.common_dir);
         assert_eq!(repo.branch().unwrap(), "linked");
-        assert_eq!(repo.branches().unwrap(), ["linked", "main"]);
     }
 
     #[cfg(unix)]
@@ -800,9 +700,9 @@ pub mod tests {
     fn symlinks_are_not_followed() {
         let (dir, repo) = repo();
         std::os::unix::fs::symlink("/nonexistent/target", dir.path().join("link")).unwrap();
-        let files = repo.files(Mode::Changes).unwrap();
+        let files = repo.files().unwrap();
         assert_eq!(
-            text(repo.contents(&files[0], Mode::Changes).unwrap().1),
+            text(repo.contents(&files[0]).unwrap().1),
             "/nonexistent/target"
         );
     }
@@ -825,16 +725,16 @@ pub mod tests {
             .output()
             .unwrap();
         assert!(!merge.status.success());
-        let files = repo.files(Mode::Changes).unwrap();
+        let files = repo.files().unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].status, 'U');
         assert!(!files[0].staged);
-        let (old, new) = repo.contents(&files[0], Mode::Changes).unwrap();
+        let (old, new) = repo.contents(&files[0]).unwrap();
         assert_eq!(text(old), "ours\n");
         assert!(text(new).contains("<<<<<<<"));
         let staged = repo.staged_files().unwrap();
         assert!(matches!(
-            repo.contents(&staged[0], Mode::Changes).unwrap().0,
+            repo.contents(&staged[0]).unwrap().0,
             Content::Notice(_)
         ));
     }
@@ -856,7 +756,7 @@ pub mod tests {
         assert!(files[0].submodule);
         assert!(files[0].staged);
         assert!(matches!(
-            repo.contents(&files[0], Mode::Changes).unwrap().0,
+            repo.contents(&files[0]).unwrap().0,
             Content::Notice(_)
         ));
     }
@@ -870,9 +770,9 @@ pub mod tests {
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-qm", "Initial"]);
         fs::write(dir.path().join(&name), "new\n").unwrap();
-        let files = repo.files(Mode::Changes).unwrap();
+        let files = repo.files().unwrap();
         assert_eq!(files[0].path.as_os_str(), name);
-        let (old, new) = repo.contents(&files[0], Mode::Changes).unwrap();
+        let (old, new) = repo.contents(&files[0]).unwrap();
         assert_eq!((text(old), text(new)), ("old\n".into(), "new\n".into()));
     }
 
@@ -885,158 +785,21 @@ pub mod tests {
         git(dir.path(), &["checkout", "--detach", "-q"]);
         assert!(repo.branch().unwrap().ends_with(" (detached)"));
         git(dir.path(), &["rm", "delete.txt"]);
-        let files = repo.files(Mode::Changes).unwrap();
+        let files = repo.files().unwrap();
         assert_eq!(files[0].status, 'D');
         assert!(files[0].staged);
-        let (old, new) = repo.contents(&files[0], Mode::Changes).unwrap();
+        let (old, new) = repo.contents(&files[0]).unwrap();
         assert_eq!((text(old), text(new)), ("goodbye\n".into(), "".into()));
-    }
-
-    #[test]
-    fn lists_local_and_remote_branches_without_tags_or_symbolic_aliases() {
-        let (dir, repo) = repo();
-        assert!(repo.branches().unwrap().is_empty());
-        git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
-        git(dir.path(), &["branch", "feature/界"]);
-        git(
-            dir.path(),
-            &["update-ref", "refs/remotes/origin/main", "HEAD"],
-        );
-        git(
-            dir.path(),
-            &[
-                "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/main",
-            ],
-        );
-        git(dir.path(), &["tag", "v1"]);
-        git(dir.path(), &["pack-refs", "--all"]);
-        assert_eq!(
-            repo.branches().unwrap(),
-            ["feature/界", "main", "origin/main"]
-        );
-        git(dir.path(), &["checkout", "--detach", "-q"]);
-        assert_eq!(
-            repo.branches().unwrap(),
-            ["feature/界", "main", "origin/main"]
-        );
-    }
-
-    #[test]
-    fn listed_branches_disambiguate_colliding_ref_names() {
-        let (dir, repo) = repo();
-        git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
-        git(dir.path(), &["tag", "main"]);
-        git(dir.path(), &["branch", "origin/main", "HEAD"]);
-        git(
-            dir.path(),
-            &["update-ref", "refs/remotes/origin/main", "HEAD"],
-        );
-        let branches = repo.branches().unwrap();
-        assert_eq!(
-            branches,
-            ["heads/main", "heads/origin/main", "remotes/origin/main"]
-        );
-        for branch in branches {
-            assert!(repo.compare_branch(&branch).is_ok());
-        }
-    }
-
-    #[test]
-    fn branch_diff_uses_merge_base_and_excludes_all_uncommitted_changes() {
-        let (dir, repo) = diverged_repo();
-        fs::write(dir.path().join("changed.rs"), "staged\n").unwrap();
-        git(dir.path(), &["add", "."]);
-        fs::write(dir.path().join("changed.rs"), "unstaged\n").unwrap();
-        fs::write(dir.path().join("untracked.rs"), "untracked\n").unwrap();
-        let mode = repo.compare_branch("main").unwrap();
-        let files = repo.files(mode.clone()).unwrap();
-        let paths: Vec<_> = files
-            .iter()
-            .map(|file| file.path.to_str().unwrap())
-            .collect();
-        assert_eq!(paths, ["added.rs", "changed.rs", "deleted.rs"]);
-        let expected = [
-            ("", "fn added() {}\n"),
-            ("fn base() {}\n", "fn feature() {}\n"),
-            ("removed\n", ""),
-        ];
-        for (file, (before, after)) in files.iter().zip(expected) {
-            let (old, new) = repo.contents(file, mode.clone()).unwrap();
-            assert_eq!((text(old), text(new)), (before.into(), after.into()));
-        }
-        let output = repo
-            .output(&["diff", "--name-only", "-z", "main...HEAD", "--"])
-            .unwrap();
-        ensure_success(&output).unwrap();
-        let git_paths: Vec<_> = output
-            .stdout
-            .split(|&b| b == 0)
-            .filter(|p| !p.is_empty())
-            .map(|p| std::str::from_utf8(p).unwrap())
-            .collect();
-        assert_eq!(paths, git_paths);
-    }
-
-    #[test]
-    fn branch_snapshots_remain_consistent_when_head_or_base_moves() {
-        let (dir, repo) = diverged_repo();
-        let mode = repo.compare_branch("main").unwrap();
-        let files = repo.files(mode.clone()).unwrap();
-        let changed = files
-            .iter()
-            .find(|file| file.path == Path::new("changed.rs"))
-            .unwrap();
-        fs::write(dir.path().join("changed.rs"), "fn later() {}\n").unwrap();
-        git(dir.path(), &["commit", "-qam", "Later"]);
-        git(dir.path(), &["branch", "-f", "main", "HEAD"]);
-        let (old, new) = repo.contents(changed, mode).unwrap();
-        assert_eq!(
-            (text(old), text(new)),
-            ("fn base() {}\n".into(), "fn feature() {}\n".into())
-        );
-        assert!(
-            repo.files(repo.compare_branch("main").unwrap())
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn branch_diff_accepts_remote_refs_and_detached_head() {
-        let (dir, repo) = diverged_repo();
-        git(
-            dir.path(),
-            &["update-ref", "refs/remotes/origin/main", "main"],
-        );
-        git(dir.path(), &["checkout", "--detach", "-q"]);
-        let mode = repo.compare_branch("origin/main").unwrap();
-        assert_eq!(repo.files(mode).unwrap().len(), 3);
-    }
-
-    #[test]
-    fn invalid_unborn_and_unrelated_branch_comparisons_report_errors() {
-        let (dir, repo) = diverged_repo();
-        for target in ["", "missing", "--help"] {
-            assert!(repo.compare_branch(target).is_err());
-        }
-        git(dir.path(), &["checkout", "--orphan", "unborn", "-q"]);
-        let error = format!("{:#}", repo.compare_branch("main").unwrap_err());
-        assert!(error.contains("requires at least one commit"));
-        git(dir.path(), &["commit", "-qm", "Unrelated"]);
-        let error = format!("{:#}", repo.compare_branch("main").unwrap_err());
-        assert!(error.contains("No common ancestor"));
     }
 
     fn selected_view(repo: &Repository, staged: bool) -> (FileEntry, crate::diff::DiffView) {
         let entry = repo
-            .files(Mode::Changes)
+            .files()
             .unwrap()
             .into_iter()
             .find(|entry| entry.staged == staged)
             .unwrap();
-        let (old, new) = repo.contents(&entry, Mode::Changes).unwrap();
+        let (old, new) = repo.contents(&entry).unwrap();
         let view = crate::diff::DiffView::build(
             &entry.path,
             old,
@@ -1066,28 +829,18 @@ pub mod tests {
         let path = ":(glob)*.txt";
         fs::write(dir.path().join(path), "selected\n").unwrap();
         fs::write(dir.path().join("other.txt"), "not selected\n").unwrap();
-        let entry = repo.files(Mode::Changes).unwrap().remove(0);
+        let entry = repo.files().unwrap().remove(0);
         assert_eq!(entry.path, Path::new(path));
-        repo.toggle_file(&entry, &Mode::Changes).unwrap();
+        repo.toggle_file(&entry).unwrap();
         let staged = repo.staged_files().unwrap();
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].path, entry.path);
         fs::write(dir.path().join(path), "later edits\n").unwrap();
-        repo.toggle_file(&staged[0], &Mode::Changes).unwrap();
+        repo.toggle_file(&staged[0]).unwrap();
         assert!(repo.staged_files().unwrap().is_empty());
         assert_eq!(
             fs::read_to_string(dir.path().join(path)).unwrap(),
             "later edits\n"
-        );
-        assert!(
-            repo.toggle_file(
-                &entry,
-                &Mode::Branch {
-                    merge_base: String::new(),
-                    head: String::new()
-                }
-            )
-            .is_err()
         );
     }
 
@@ -1105,23 +858,20 @@ pub mod tests {
         fs::write(&path, &new).unwrap();
         let (entry, view) = selected_view(&repo, false);
         assert_eq!(view.hunks.len(), 2);
-        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[1])
-            .unwrap();
+        repo.toggle_hunk(&entry, &view.patches[1]).unwrap();
         assert_eq!(
             text(repo.blob(":", &entry.path).unwrap()),
             old.replace("line 39\r\nline 40\r\n", "last")
         );
         let (entry, staged) = selected_view(&repo, true);
-        repo.toggle_hunk(&entry, &Mode::Changes, &staged.patches[0])
-            .unwrap();
+        repo.toggle_hunk(&entry, &staged.patches[0]).unwrap();
         assert!(repo.staged_files().unwrap().is_empty());
         assert_eq!(fs::read_to_string(&path).unwrap(), new);
         // Stage everything, then unstage only the first hunk; the second stays staged.
         let (entry, _) = selected_view(&repo, false);
-        repo.toggle_file(&entry, &Mode::Changes).unwrap();
+        repo.toggle_file(&entry).unwrap();
         let (entry, staged) = selected_view(&repo, true);
-        repo.toggle_hunk(&entry, &Mode::Changes, &staged.patches[0])
-            .unwrap();
+        repo.toggle_hunk(&entry, &staged.patches[0]).unwrap();
         assert_eq!(
             text(repo.blob(":", &entry.path).unwrap()),
             old.replace("line 39\r\nline 40\r\n", "last")
@@ -1139,8 +889,7 @@ pub mod tests {
         git(dir.path(), &["commit", "-qm", "Initial"]);
         fs::write(dir.path().join(&name), "new\n").unwrap();
         let (entry, view) = selected_view(&repo, false);
-        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[0])
-            .unwrap();
+        repo.toggle_hunk(&entry, &view.patches[0]).unwrap();
         assert_eq!(text(repo.blob(":", &entry.path).unwrap()), "new\n");
     }
 
@@ -1149,30 +898,26 @@ pub mod tests {
         let (dir, repo) = repo();
         fs::write(dir.path().join("file.txt"), "new text").unwrap();
         let (entry, view) = selected_view(&repo, false);
-        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[0])
-            .unwrap();
+        repo.toggle_hunk(&entry, &view.patches[0]).unwrap();
         let (entry, view) = selected_view(&repo, true);
-        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[0])
-            .unwrap();
+        repo.toggle_hunk(&entry, &view.patches[0]).unwrap();
         assert!(repo.staged_files().unwrap().is_empty());
         let (entry, _) = selected_view(&repo, false);
-        repo.toggle_file(&entry, &Mode::Changes).unwrap();
+        repo.toggle_file(&entry).unwrap();
         repo.run_operation(&Operation::Commit("Add file".into()))
             .unwrap();
         fs::remove_file(dir.path().join("file.txt")).unwrap();
         let (entry, view) = selected_view(&repo, false);
-        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[0])
-            .unwrap();
+        repo.toggle_hunk(&entry, &view.patches[0]).unwrap();
         let (entry, view) = selected_view(&repo, true);
-        repo.toggle_hunk(&entry, &Mode::Changes, &view.patches[0])
-            .unwrap();
+        repo.toggle_hunk(&entry, &view.patches[0]).unwrap();
         assert!(!dir.path().join("file.txt").exists());
         assert!(repo.staged_files().unwrap().is_empty());
         fs::write(dir.path().join("file.txt"), [0, 1, 2]).unwrap();
-        let entry = repo.files(Mode::Changes).unwrap().remove(0);
-        repo.toggle_file(&entry, &Mode::Changes).unwrap();
+        let entry = repo.files().unwrap().remove(0);
+        repo.toggle_file(&entry).unwrap();
         let entry = repo.staged_files().unwrap().remove(0);
-        repo.toggle_file(&entry, &Mode::Changes).unwrap();
+        repo.toggle_file(&entry).unwrap();
         assert_eq!(fs::read(dir.path().join("file.txt")).unwrap(), [0, 1, 2]);
     }
 
@@ -1193,7 +938,7 @@ pub mod tests {
         let log = repo.output(&["log", "-1", "--format=%B"]).unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).trim_end(), message);
         assert!(repo.staged_files().unwrap().is_empty());
-        assert_eq!(repo.files(Mode::Changes).unwrap().len(), 2);
+        assert_eq!(repo.files().unwrap().len(), 2);
         assert!(
             repo.run_operation(&Operation::Commit("  \n".into()))
                 .is_err()
