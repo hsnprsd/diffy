@@ -1,8 +1,9 @@
 use std::{
     collections::VecDeque,
     io::{Read, Write},
-    process::{Command, Stdio},
-    sync::mpsc::{self, Receiver, SyncSender},
+    process::{Child, Command, Stdio},
+    sync::mpsc::{self, Receiver, Sender, SyncSender},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -16,32 +17,55 @@ const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_LINE_BYTES: usize = 8 * 1024;
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum OperationResult {
+    Success,
+    Cancelled,
+    Failed(String),
+}
+
 pub enum OperationEvent {
     Prepared(String),
     Output(String),
-    Finished(Result<(), String>),
+    Finished(OperationResult),
 }
 
-pub fn spawn(repo: Repository, operation: Operation) -> Receiver<OperationEvent> {
-    let (sender, receiver) = mpsc::sync_channel(QUEUED_CHUNKS);
+pub struct OperationHandle {
+    pub events: Receiver<OperationEvent>,
+    pub cancel: Sender<()>,
+}
+
+pub fn spawn(repo: Repository, operation: Operation) -> OperationHandle {
+    let (sender, events) = mpsc::sync_channel(QUEUED_CHUNKS);
+    let (cancel, cancellation) = mpsc::channel();
     std::thread::spawn(move || {
         let result = repo
             .operation_command(&operation)
             .and_then(|prepared| {
                 let _ = sender.send(OperationEvent::Prepared(prepared.success_message));
-                run(prepared.command, prepared.input, &sender)
+                run(prepared.command, prepared.input, &sender, &cancellation)
             })
-            .map_err(|error| format!("{error:#}"));
+            .unwrap_or_else(|error| OperationResult::Failed(format!("{error:#}")));
         let _ = sender.send(OperationEvent::Finished(result));
     });
-    receiver
+    OperationHandle { events, cancel }
 }
 
 fn run(
     mut command: Command,
     input: Option<String>,
     sender: &SyncSender<OperationEvent>,
-) -> Result<()> {
+    cancellation: &Receiver<()>,
+) -> Result<OperationResult> {
+    if !matches!(cancellation.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+        return Ok(OperationResult::Cancelled);
+    }
+    // Give Git and its hooks/transports a separate group, never signal the TUI.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     if input.is_some() {
         command.stdin(Stdio::piped());
     }
@@ -63,7 +87,36 @@ fn run(
             }
             Ok(())
         });
-        let status = child.wait().context("Could not wait for Git");
+        let mut status = None;
+        let mut interrupted = None;
+        let mut forced = false;
+        loop {
+            if status.is_none() {
+                status = child.try_wait().context("Could not wait for Git")?;
+            }
+            // Descendants may still hold the pipes even after Git itself exits.
+            if status.is_some()
+                && stdout.is_finished()
+                && stderr.is_finished()
+                && write.is_finished()
+                && (interrupted.is_none() || forced || !group_running(&child))
+            {
+                break;
+            }
+            if let Some(start) = interrupted {
+                if !forced && Instant::now().duration_since(start) >= Duration::from_secs(1) {
+                    terminate(&mut child, true).context("Could not stop Git")?;
+                    forced = true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            } else if !matches!(
+                cancellation.recv_timeout(Duration::from_millis(20)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                terminate(&mut child, false).context("Could not interrupt Git")?;
+                interrupted = Some(Instant::now());
+            }
+        }
         let out = stdout
             .join()
             .map_err(|_| anyhow::anyhow!("Git stdout reader panicked"))?;
@@ -73,7 +126,10 @@ fn run(
         let write = write
             .join()
             .map_err(|_| anyhow::anyhow!("Git input writer panicked"))?;
-        let status = status?;
+        if interrupted.is_some() {
+            return Ok(OperationResult::Cancelled);
+        }
+        let status = status.unwrap();
         out.context("Could not read Git stdout")?;
         err.context("Could not read Git stderr")?;
         // Prefer Git's failure over a broken pipe when it rejected the input early.
@@ -81,8 +137,57 @@ fn run(
             bail!("Git exited with {status}");
         }
         write.context("Could not send input to Git")?;
-        Ok(())
+        Ok(OperationResult::Success)
     })
+}
+
+fn group_running(child: &Child) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks the private process group's existence.
+        unsafe { libc::kill(-(child.id() as libc::pid_t), 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child;
+        false
+    }
+}
+
+fn terminate(child: &mut Child, force: bool) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let signal = if force { libc::SIGKILL } else { libc::SIGINT };
+        // SAFETY: a negative child PID addresses the group created by process_group(0).
+        let result = unsafe { libc::kill(-(child.id() as libc::pid_t), signal) };
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        let _ = force;
+        let status = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() && child.try_wait()?.is_none() {
+            return Err(std::io::Error::other(
+                "Could not terminate Git process tree",
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = force;
+        child.kill()
+    }
 }
 
 fn stream(mut pipe: impl Read, sender: &SyncSender<OperationEvent>) -> std::io::Result<()> {
@@ -133,7 +238,8 @@ pub struct OperationDetails {
     pub label: &'static str,
     pub commit: bool,
     pub success_message: String,
-    pub result: Option<Result<(), String>>,
+    pub result: Option<OperationResult>,
+    pub cancelling: bool,
     pub lines: VecDeque<String>,
     bytes: usize,
     carriage_return: bool,
@@ -152,6 +258,7 @@ impl OperationDetails {
             commit: matches!(operation, Operation::Commit(_)),
             success_message: String::new(),
             result: None,
+            cancelling: false,
             lines: VecDeque::from([String::new()]),
             bytes: 0,
             carriage_return: false,
@@ -164,10 +271,13 @@ impl OperationDetails {
         }
     }
 
-    pub fn finish(&mut self, result: Result<(), String>) {
-        if let Err(error) = &result {
-            self.append(&format!("\n{error}\n"));
+    pub fn finish(&mut self, result: OperationResult) {
+        match &result {
+            OperationResult::Failed(error) => self.append(&format!("\n{error}\n")),
+            OperationResult::Cancelled => self.append("\nGit operation cancelled\n"),
+            OperationResult::Success => {}
         }
+        self.cancelling = false;
         self.result = Some(result);
     }
 
@@ -244,9 +354,6 @@ impl OperationDetails {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::time::Duration;
-
     use super::*;
 
     #[test]
@@ -330,8 +437,12 @@ mod tests {
             "-c",
             "head -c 524288 /dev/zero; head -c 524288 /dev/zero >&2; cat >/dev/null; printf done",
         ]);
+        let (_cancel, cancellation) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            run(command, Some("m".repeat(524288)), &sender).unwrap();
+            assert_eq!(
+                run(command, Some("m".repeat(524288)), &sender, &cancellation).unwrap(),
+                OperationResult::Success
+            );
         });
         let mut bytes = 0;
         let mut text_output = String::new();
@@ -352,12 +463,53 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_before_start_does_not_run_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("not-created");
+        let mut command = Command::new("git");
+        command.arg("init").arg(&target);
+        let (sender, _events) = mpsc::sync_channel(QUEUED_CHUNKS);
+        let (cancel, cancellation) = mpsc::channel();
+        cancel.send(()).unwrap();
+        assert_eq!(
+            run(command, None, &sender, &cancellation).unwrap(),
+            OperationResult::Cancelled
+        );
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_force_stops_children_that_ignore_interrupts_and_unblocks_input() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "trap '' INT; sleep 30 & printf ready; wait"]);
+        let (sender, events) = mpsc::sync_channel(QUEUED_CHUNKS);
+        let (cancel, cancellation) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = run(command, Some("m".repeat(524288)), &sender, &cancellation).unwrap();
+            sender.send(OperationEvent::Finished(result)).unwrap();
+        });
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            OperationEvent::Output(text) if text == "ready"
+        ));
+        cancel.send(()).unwrap();
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            OperationEvent::Finished(OperationResult::Cancelled)
+        ));
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn spawn_failure_is_reported() {
         let (sender, _receiver) = mpsc::sync_channel(QUEUED_CHUNKS);
+        let (_cancel, cancellation) = mpsc::channel();
         let error = run(
             Command::new("/nonexistent/diffy-test-command"),
             None,
             &sender,
+            &cancellation,
         )
         .unwrap_err();
         assert!(error.to_string().contains("Could not run Git"));

@@ -15,7 +15,7 @@ use crate::{
     diff::{DiffRow, RowKind},
     git::{Mode, safe_text},
     highlight::TEXT,
-    operation::OperationDetails,
+    operation::{OperationDetails, OperationResult},
 };
 
 const BG: Color = Color::Rgb(0, 0, 0);
@@ -105,7 +105,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let footer = if let Some(label) = app.operation_label() {
         let details = app.operation_details.as_ref().unwrap();
         Line::styled(
-            format!(" {label}… · {}", safe_text(details.summary(true))),
+            format!(
+                " {label}… · Esc cancel · {}",
+                safe_text(details.summary(true))
+            ),
             Style::default().fg(ACCENT),
         )
     } else if let Some(error) = &app.error {
@@ -113,10 +116,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if let Some(status) = &app.status {
         Line::styled(
             format!(" {}", safe_text(status.message())),
-            Style::default().fg(if matches!(status, Status::Error(_)) {
-                RED
-            } else {
-                GREEN
+            Style::default().fg(match status {
+                Status::Success(_) => GREEN,
+                Status::Error(_) => RED,
+                Status::Cancelled(_) => ACCENT,
             }),
         )
     } else {
@@ -438,9 +441,11 @@ fn operation_details(frame: &mut Frame, area: Rect, details: &mut OperationDetai
         height,
     );
     let (title, color) = match &details.result {
+        None if details.cancelling => ("Cancelling…".into(), ACCENT),
         None => (format!("{}…", details.label), ACCENT),
-        Some(Ok(())) => (details.success_message.clone(), GREEN),
-        Some(Err(_)) => ("Git operation failed".into(), RED),
+        Some(OperationResult::Success) => (details.success_message.clone(), GREEN),
+        Some(OperationResult::Cancelled) => ("Git operation cancelled".into(), ACCENT),
+        Some(OperationResult::Failed(_)) => ("Git operation failed".into(), RED),
     };
     let block =
         pane(format!(" {} ", safe_text(&title)), true).border_style(Style::default().fg(color));
@@ -518,8 +523,10 @@ fn operation_details(frame: &mut Frame, area: Rect, details: &mut OperationDetai
             "↑/↓ scroll · PgUp/PgDn page · Home/End · h/l horizontal{}",
             if details.result.is_some() {
                 " · Esc close"
+            } else if details.cancelling {
+                " · stopping Git…"
             } else {
-                ""
+                " · Esc cancel"
             }
         ))
         .style(Style::default().fg(ACCENT)),
@@ -850,18 +857,28 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(screen(&terminal).contains("Pushing…"));
+        assert!(screen(&terminal).contains("Esc cancel"));
+        app.operation_details.as_mut().unwrap().cancelling = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("Cancelling…"));
 
-        for result in [Ok(()), Err("Push rejected".to_owned())] {
+        for result in [
+            OperationResult::Success,
+            OperationResult::Failed("Push rejected".to_owned()),
+            OperationResult::Cancelled,
+        ] {
             let details = app.operation_details.as_mut().unwrap();
             let status = match &result {
-                Ok(()) => Status::Success(details.success_message.clone()),
-                Err(error) => Status::Error(error.clone()),
+                OperationResult::Success => Status::Success(details.success_message.clone()),
+                OperationResult::Failed(error) => Status::Error(error.clone()),
+                OperationResult::Cancelled => Status::Cancelled("Git operation cancelled".into()),
             };
             details.finish(result);
             let message = status.message().to_owned();
             let title = match &status {
                 Status::Success(_) => message.as_str(),
                 Status::Error(_) => "Git operation failed",
+                Status::Cancelled(_) => "Git operation cancelled",
             };
             app.status = Some(status);
             for show_details in [false, true] {
@@ -887,7 +904,9 @@ mod tests {
             details.append(&format!("output row {n:03} 界\n"));
         }
         details.append("rejected by hook\u{1b}[31m\n");
-        details.finish(Err("Git exited with exit status: 1".into()));
+        details.finish(OperationResult::Failed(
+            "Git exited with exit status: 1".into(),
+        ));
         app.operation_details = Some(details);
         app.show_operation_details = true;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -914,7 +933,10 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.show_operation_details);
         app.show_operation_details = true;
-        app.operation_details.as_mut().unwrap().finish(Ok(()));
+        app.operation_details
+            .as_mut()
+            .unwrap()
+            .finish(OperationResult::Success);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(screen(&terminal).contains("Pushed to origin (refs/heads/main)"));
     }

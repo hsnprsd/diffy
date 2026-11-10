@@ -1,4 +1,4 @@
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -9,7 +9,7 @@ use crate::{
     editor::EditRequest,
     git::{Content, FileEntry, Mode, Operation, Repository},
     highlight::SyntaxHighlighter,
-    operation::{self, OperationDetails, OperationEvent},
+    operation::{self, OperationDetails, OperationEvent, OperationHandle, OperationResult},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -169,12 +169,13 @@ impl CommitPopup {
 pub enum Status {
     Success(String),
     Error(String),
+    Cancelled(String),
 }
 
 impl Status {
     pub fn message(&self) -> &str {
         match self {
-            Self::Success(message) | Self::Error(message) => message,
+            Self::Success(message) | Self::Error(message) | Self::Cancelled(message) => message,
         }
     }
 }
@@ -187,7 +188,7 @@ pub struct App {
     pub branch_picker: Option<BranchPicker>,
     pub commit_popup: Option<CommitPopup>,
     pub status: Option<Status>,
-    pending: Option<Receiver<OperationEvent>>,
+    pending: Option<OperationHandle>,
     pub operation_details: Option<OperationDetails>,
     pub show_operation_details: bool,
     pub files: Vec<FileEntry>,
@@ -360,7 +361,14 @@ impl App {
     pub fn operation_label(&self) -> Option<&'static str> {
         self.pending
             .as_ref()
-            .and_then(|_| self.operation_details.as_ref().map(|details| details.label))
+            .and(self.operation_details.as_ref())
+            .map(|details| {
+                if details.cancelling {
+                    "Cancelling"
+                } else {
+                    details.label
+                }
+            })
     }
 
     fn ensure_idle(&self) -> Result<()> {
@@ -445,12 +453,12 @@ impl App {
         let mut dirty = false;
         // Limit work per frame even when a hook continuously produces output.
         for _ in 0..64 {
-            let event = match self.pending.as_ref().unwrap().try_recv() {
+            let event = match self.pending.as_ref().unwrap().events.try_recv() {
                 Ok(event) => event,
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    OperationEvent::Finished(Err("Git worker disconnected".into()))
-                }
+                Err(TryRecvError::Disconnected) => OperationEvent::Finished(
+                    OperationResult::Failed("Git worker disconnected".into()),
+                ),
             };
             dirty = true;
             match event {
@@ -467,7 +475,7 @@ impl App {
                     let output_summary = details.summary(true).to_owned();
                     details.finish(result);
                     match details.result.as_ref().unwrap() {
-                        Ok(()) => {
+                        OperationResult::Success => {
                             if details.commit {
                                 self.commit_popup = None;
                             }
@@ -478,7 +486,17 @@ impl App {
                             };
                             self.status = Some(Status::Success(message));
                         }
-                        Err(error) => {
+                        OperationResult::Cancelled => {
+                            let message = "Git operation cancelled".to_owned();
+                            if details.commit
+                                && let Some(popup) = &mut self.commit_popup
+                            {
+                                popup.error = Some(message.clone());
+                            }
+                            self.status = Some(Status::Cancelled(message));
+                            self.show_operation_details = true;
+                        }
+                        OperationResult::Failed(error) => {
                             let message =
                                 format!("Git operation failed: {error}; {output_summary}");
                             if details.commit
@@ -611,6 +629,16 @@ impl App {
                 return false;
             }
             return true;
+        }
+        if key.code == KeyCode::Esc
+            && let Some(pending) = &self.pending
+        {
+            let details = self.operation_details.as_mut().unwrap();
+            if !details.cancelling {
+                let _ = pending.cancel.send(());
+                details.cancelling = true;
+            }
+            return false;
         }
         if self.show_help {
             self.show_help = false;
@@ -1290,6 +1318,27 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn wait_for_output(app: &mut App, expected: &[&str]) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            app.poll_operation();
+            let details = app.operation_details.as_ref().unwrap();
+            if expected
+                .iter()
+                .all(|text| details.lines.iter().any(|line| line.contains(text)))
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Missing live Git output: {:?}",
+                details.lines
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn space_in_files_stages_and_unstages_the_whole_file() {
         let (dir, mut app) = app_with_hunks();
@@ -1502,7 +1551,6 @@ mod tests {
         );
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert_eq!(app.operation_label(), Some("Committing"));
-        assert!(!app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(app.commit_popup.is_some());
         wait_for_operation(&mut app);
         assert!(app.commit_popup.is_none(), "{:?}", app.error);
@@ -1651,32 +1699,10 @@ mod tests {
         app.handle_key(key('c'));
         app.handle_paste("Live commit");
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            app.poll_operation();
-            let output = app
-                .operation_details
-                .as_ref()
-                .unwrap()
-                .lines
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n");
-            if output.contains("live stdout 界") && output.contains("live stderr") {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "No live hook output: {output}"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        wait_for_output(&mut app, &["live stdout 界", "live stderr"]);
         assert_eq!(app.operation_label(), Some("Committing"));
-        for code in [KeyCode::Esc, KeyCode::Char('q')] {
-            assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
-            assert!(app.show_operation_details);
-        }
+        assert!(!app.handle_key(key('q')));
+        assert!(app.show_operation_details);
         app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert_eq!(app.operation_details.as_ref().unwrap().scroll, 0);
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -1692,14 +1718,9 @@ mod tests {
                 .message()
                 .starts_with("Committed:")
         );
-        assert!(
-            app.operation_details
-                .as_ref()
-                .unwrap()
-                .result
-                .as_ref()
-                .unwrap()
-                .is_ok()
+        assert_eq!(
+            app.operation_details.as_ref().unwrap().result,
+            Some(OperationResult::Success)
         );
         assert!(app.commit_popup.is_none());
         assert!(app.repo.staged_files().unwrap().is_empty());
@@ -1708,12 +1729,118 @@ mod tests {
         assert!(!app.show_operation_details);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn escape_cancels_a_running_commit_and_preserves_output_and_draft_for_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        let hook = repo.git_dir.join("hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nprintf 'hook waiting\\n'\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut app = App::new(repo, None).unwrap();
+        app.handle_key(key('c'));
+        app.handle_paste("Keep this draft 界\n\nBody");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        wait_for_output(&mut app, &["hook waiting"]);
+
+        for _ in 0..2 {
+            assert!(!app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            assert_eq!(app.operation_label(), Some("Cancelling"));
+            assert!(app.show_operation_details);
+            assert!(app.ensure_idle().is_err());
+        }
+        assert!(!app.handle_key(key('q')));
+        app.handle_paste("Do not change the draft");
+        wait_for_operation(&mut app);
+
+        let details = app.operation_details.as_ref().unwrap();
+        assert_eq!(details.result, Some(OperationResult::Cancelled));
+        assert!(!details.cancelling);
+        assert!(details.lines.iter().any(|line| line == "hook waiting"));
+        assert!(app.show_operation_details);
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(
+            app.commit_popup.as_ref().unwrap().message,
+            "Keep this draft 界\n\nBody"
+        );
+        assert_eq!(app.repo.staged_files().unwrap().len(), 1);
+        assert!(!app.repo.git_dir.join("index.lock").exists());
+        app.refresh();
+        assert!(matches!(app.status, Some(Status::Cancelled(_))));
+        assert_eq!(
+            app.status.as_ref().unwrap().message(),
+            "Git operation cancelled"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.show_operation_details);
+        assert!(app.commit_popup.is_some());
+        std::fs::remove_file(hook).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        wait_for_operation(&mut app);
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(app.commit_popup.is_none());
+        assert!(app.repo.staged_files().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escape_cancels_pull_and_push_while_waiting_on_the_transport() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, _remote, repo) = crate::git::tests::connected_repo();
+        let ssh = repo.git_dir.join("test-ssh");
+        std::fs::write(
+            &ssh,
+            "#!/bin/sh\nprintf 'transport waiting\\n' >&2\nsleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(
+            dir.path(),
+            &["config", "core.sshCommand", ssh.to_str().unwrap()],
+        );
+        git(dir.path(), &["config", "ssh.variant", "ssh"]);
+        git(
+            dir.path(),
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "ssh://diffy-test.invalid/repo.git",
+            ],
+        );
+
+        for shortcut in ['p', 'P'] {
+            let mut app = App::new(repo.clone(), None).unwrap();
+            app.handle_key(key(shortcut));
+            wait_for_output(&mut app, &["transport waiting"]);
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert_eq!(app.operation_label(), Some("Cancelling"));
+            wait_for_operation(&mut app);
+            assert_eq!(
+                app.operation_details.as_ref().unwrap().result,
+                Some(OperationResult::Cancelled)
+            );
+            assert!(matches!(app.status, Some(Status::Cancelled(_))));
+            assert!(app.error.is_none(), "{:?}", app.error);
+            assert!(app.show_operation_details);
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(!app.show_operation_details);
+            assert!(app.handle_key(key('q')));
+        }
+    }
+
     #[test]
     fn operation_polling_is_bounded_and_worker_disconnects_are_reported() {
         let (_dir, repo) = repo();
         let mut app = App::new(repo, None).unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
-        app.pending = Some(receiver);
+        app.pending = Some(OperationHandle {
+            events: receiver,
+            cancel: std::sync::mpsc::channel().0,
+        });
         let mut details = OperationDetails::new(&Operation::Pull);
         details.success_message = "Pulled main".into();
         app.operation_details = Some(details);
@@ -1722,7 +1849,9 @@ mod tests {
                 .send(OperationEvent::Output("line\n".into()))
                 .unwrap();
         }
-        sender.send(OperationEvent::Finished(Ok(()))).unwrap();
+        sender
+            .send(OperationEvent::Finished(OperationResult::Success))
+            .unwrap();
         assert!(app.poll_operation());
         assert_eq!(app.operation_details.as_ref().unwrap().lines.len(), 65);
         assert!(app.pending.is_some());
@@ -1733,7 +1862,10 @@ mod tests {
         assert_eq!(app.status.as_ref().unwrap().message(), "Pulled main");
 
         let (sender, receiver) = std::sync::mpsc::channel();
-        app.pending = Some(receiver);
+        app.pending = Some(OperationHandle {
+            events: receiver,
+            cancel: std::sync::mpsc::channel().0,
+        });
         app.operation_details = Some(OperationDetails::new(&Operation::Push));
         drop(sender);
         assert!(app.poll_operation());

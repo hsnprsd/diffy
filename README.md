@@ -115,6 +115,7 @@ fetches from its upstream), or fetch other remotes outside diffy when needed.
 | `Space` | Stage an unstaged entry / unstage a staged entry: whole file in Files, first visible hunk in Diff |
 | `c` | Open the commit-message popup for staged changes |
 | `p` / `P` | Pull (fast-forward only) / push the current branch |
+| `Esc` | Cancel a running commit, pull, or push; close its output after completion |
 | `e` | Open in `$EDITOR` at the first visible hunk (Diff pane) or first file hunk (Files pane) |
 | `h` / `l` | Scroll code horizontally |
 | `PageUp` / `PageDown`, `u` / `d` | Page up / down |
@@ -150,7 +151,8 @@ Press **`c`** to open a commit-message popup when there are staged changes. Type
 or paste a message; **`Enter`** inserts a newline, **`Ctrl+S`** commits, and
 **`Esc`** cancels. Arrow keys, Home/End, Backspace/Delete, and Unicode text are
 supported; **`Ctrl+U`** clears the message. Commit failures (including rejected
-hooks) open the output/details popup and preserve the message. Press **`Esc`** to
+hooks) open the output/details popup and preserve the message. Cancelling a
+running commit also preserves its draft. Press **`Esc`** after completion to
 return to the message, edit, and retry.
 Commits use the current index without staging any additional working-tree edits.
 
@@ -174,13 +176,21 @@ In the output popup, **`↑`/`↓`** or **`j`/`k`** scroll, **`PageUp`/`PageDown
 (or `u`/`d`) page, **`Home`** goes to the beginning, and **`End`** resumes following
 new output. Scrolling up pauses following so incoming output does not move the
 text you are reading. **`h`/`l`** or `←`/`→` scroll long lines horizontally.
-The popup stays open and scrollable until the command finishes. After completion,
-**`Esc`** or `q` closes it. Failures and their output remain visible across
-filesystem refreshes.
+Press **`Esc`** while a command is running to cancel it. The popup shows
+**Cancelling…** while Git stops, then **Git operation cancelled**; output and any
+commit draft are preserved. The popup stays open and scrollable during cancellation.
+After completion, **`Esc`** or `q` closes it. Failures and their output remain
+visible across filesystem refreshes.
+
+On Unix, cancellation interrupts Git and its child processes (including hooks and
+transports), allowing Git to clean up; processes that remain after one second are
+force-stopped. On Windows, the process tree is force-stopped. Cancellation does
+not undo changes already made locally or on a remote; inspect the refreshed
+repository state before retrying.
 
 Repository watching continues in the background while Git is running. Further Git
-writes, editor launches, and quitting wait until the operation finishes; operation
-cancellation is not supported.
+writes, editor launches, and quitting wait until the operation has finished or
+stopped after cancellation.
 Output history is bounded to 256 KiB, 2,000 lines, and 8 KiB per line, with a notice
 when output is omitted. Terminal control characters in output are escaped.
 Git terminal credential prompts are disabled; configure credentials, SSH agents,
@@ -263,4 +273,5 @@ current-branch refspecs, fast-forwards, divergence, and detached HEAD errors.
 Operation tests cover live hook output before completion, concurrent pipe draining
 with large commit input, split/invalid UTF-8, carriage-return progress, bounded
 history and per-frame polling, scroll/follow behavior, tiny output
-popups, preserved commit drafts, and past-tense completion messages.
+popups, preserved commit drafts, past-tense completion messages, and Escape
+cancellation of running commands and their child processes.

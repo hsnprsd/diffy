@@ -31,7 +31,7 @@ fn help_describes_automatic_updates_and_pane_navigation() {
     assert!(help.contains("Ctrl+S commit"));
     assert!(help.contains("Pull is fast-forward only"));
     assert!(help.contains("Git output opens automatically"));
-    assert!(help.contains("PgUp/PgDn scroll · Esc close after completion"));
+    assert!(help.contains("PgUp/PgDn scroll · Esc cancel running / close completed"));
 }
 
 #[test]
