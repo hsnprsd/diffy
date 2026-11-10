@@ -81,6 +81,12 @@ impl Operation {
     }
 }
 
+pub struct OperationCommand {
+    pub command: Command,
+    pub input: Option<String>,
+    pub success_message: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Repository {
     pub root: PathBuf,
@@ -345,18 +351,19 @@ impl Repository {
         ensure_success(&output)
     }
 
-    pub fn run_operation(&self, operation: &Operation) -> Result<String> {
+    pub fn operation_command(&self, operation: &Operation) -> Result<OperationCommand> {
         let mut cmd = command(&self.root);
+        let mut success_message = "Committed".to_owned();
         // Capture command output and disable Git's terminal prompts. Authentication
         // and signing can still use configured agents or askpass programs.
         cmd.env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_EDITOR", "true")
             .env("GIT_SEQUENCE_EDITOR", "true");
-        let output = match operation {
+        let input = match operation {
             Operation::Commit(message) => {
                 anyhow::ensure!(!message.trim().is_empty(), "Enter a commit message");
                 cmd.args(["commit", "--cleanup=whitespace", "-F", "-"]);
-                with_input(cmd, message.as_bytes())?
+                Some(message.clone())
             }
             Operation::Pull | Operation::Push => {
                 let output = self.output(&["symbolic-ref", "--quiet", "HEAD"])?;
@@ -366,7 +373,8 @@ impl Repository {
                     .strip_prefix("refs/heads/")
                     .context("HEAD must point to a local branch")?;
                 if matches!(operation, Operation::Pull) {
-                    cmd.args(["pull", "--ff-only", "--no-rebase"]);
+                    cmd.args(["pull", "--ff-only", "--no-rebase", "--progress"]);
+                    success_message = format!("Pulled {branch}");
                 } else {
                     let config = |key: &str| -> Result<Option<String>> {
                         let output = self.output(&["config", "--get", key])?;
@@ -406,18 +414,35 @@ impl Repository {
                         None
                     }
                     .unwrap_or_else(|| format!("refs/heads/{branch}"));
-                    cmd.arg("push");
+                    cmd.args(["push", "--progress"]);
                     if upstream_remote.is_none() {
                         cmd.arg("--set-upstream");
                     }
                     // An explicit refspec prevents push.default=matching or remote.push
                     // from accidentally pushing branches other than the current one.
+                    success_message = format!("Pushed to {remote} ({target})");
                     cmd.arg("--")
                         .arg(remote)
                         .arg(format!("{branch_ref}:{target}"));
                 }
-                cmd.output()?
+                None
             }
+        };
+        Ok(OperationCommand {
+            command: cmd,
+            input,
+            success_message,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn run_operation(&self, operation: &Operation) -> Result<String> {
+        let OperationCommand {
+            mut command, input, ..
+        } = self.operation_command(operation)?;
+        let output = match input {
+            Some(input) => with_input(command, input.as_bytes())?,
+            None => command.output()?,
         };
         ensure_success(&output)?;
         let message = [&output.stdout[..], &output.stderr[..]]

@@ -24,8 +24,9 @@ Ratatui, Tree-sitter, and native filesystem notifications.
   hunk, then `c` to write a commit message in a popup. Only staged changes are
   committed; unstaged edits stay on disk.
 - **Pull and push:** `p` fast-forwards the current branch from its upstream; `P`
-  pushes only the current branch. Commands run in the background with status and
-  errors shown in the interface.
+  pushes only the current branch. Commands run in the background with live output
+  and a scrollable details popup. Completed commands show past-tense
+  results, including the destination remote and branch for pushes.
 - **Explicit writes:** browsing never modifies the index or working tree. Staging,
   unstaging, committing, pulling, pushing, and editing require explicit shortcuts;
   staging/unstaging never changes working-tree files. External diff/textconv tools are
@@ -149,12 +150,13 @@ Press **`c`** to open a commit-message popup when there are staged changes. Type
 or paste a message; **`Enter`** inserts a newline, **`Ctrl+S`** commits, and
 **`Esc`** cancels. Arrow keys, Home/End, Backspace/Delete, and Unicode text are
 supported; **`Ctrl+U`** clears the message. Commit failures (including rejected
-hooks) leave the message and error in the popup so you can edit and retry.
+hooks) open the output/details popup and preserve the message. Press **`Esc`** to
+return to the message, edit, and retry.
 Commits use the current index without staging any additional working-tree edits.
 
 ### Pull and push the current branch
 
-- **`p`** runs `git pull --ff-only --no-rebase` using the current branch's upstream.
+- **`p`** runs `git pull --ff-only --no-rebase --progress` using the current branch's upstream.
   Diverged histories are rejected without merging or rebasing.
 - **`P`** pushes an explicit refspec for the current branch only, without force.
   The configured branch push remote, `remote.pushDefault`, and upstream remote
@@ -163,11 +165,27 @@ Commits use the current index without staging any additional working-tree edits.
   current branch name is used. A first push sets the upstream if none exists.
 
 Detached HEADs cannot be pulled/pushed. Commit, pull, and push run in the
-background; navigation and live updates continue, but further Git writes,
-editor launches, and quitting wait until the operation finishes. Output and
-errors appear in the footer. Git terminal credential prompts are disabled;
-configure credentials, SSH agents, or askpass/signing helpers beforehand.
-Git hooks and configured commit signing remain enabled.
+background. Their output popup opens automatically, showing stdout/stderr as it
+arrives. Pull/push explicitly enable Git's progress output. After completion the
+result changes to **Committed**, **Pulled**, or **Pushed to REMOTE (BRANCH)**,
+rather than leaving a running-operation label behind.
+
+In the output popup, **`↑`/`↓`** or **`j`/`k`** scroll, **`PageUp`/`PageDown`**
+(or `u`/`d`) page, **`Home`** goes to the beginning, and **`End`** resumes following
+new output. Scrolling up pauses following so incoming output does not move the
+text you are reading. **`h`/`l`** or `←`/`→` scroll long lines horizontally.
+The popup stays open and scrollable until the command finishes. After completion,
+**`Esc`** or `q` closes it. Failures and their output remain visible across
+filesystem refreshes.
+
+Repository watching continues in the background while Git is running. Further Git
+writes, editor launches, and quitting wait until the operation finishes; operation
+cancellation is not supported.
+Output history is bounded to 256 KiB, 2,000 lines, and 8 KiB per line, with a notice
+when output is omitted. Terminal control characters in output are escaped.
+Git terminal credential prompts are disabled; configure credentials, SSH agents,
+or askpass/signing helpers beforehand. Git hooks and configured commit signing
+remain enabled.
 
 ### Open a file in your editor
 
@@ -242,3 +260,7 @@ hunks, stale previews, unusual paths, CRLF/missing newlines, Unicode message
 editing, commit-hook failures/retries, and preserving unstaged edits. Push/pull
 tests use isolated local bare remotes, covering first-push tracking, explicit
 current-branch refspecs, fast-forwards, divergence, and detached HEAD errors.
+Operation tests cover live hook output before completion, concurrent pipe draining
+with large commit input, split/invalid UTF-8, carriage-return progress, bounded
+history and per-frame polling, scroll/follow behavior, tiny output
+popups, preserved commit drafts, and past-tense completion messages.

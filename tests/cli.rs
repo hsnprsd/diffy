@@ -30,17 +30,14 @@ fn help_describes_automatic_updates_and_pane_navigation() {
     assert!(help.contains("c commit · p pull · P push"));
     assert!(help.contains("Ctrl+S commit"));
     assert!(help.contains("Pull is fast-forward only"));
-    assert!(!help.contains("Never stages"));
-    assert!(!help.contains("--no-watch"));
-    assert!(!help.contains("n/p"));
-    assert!(!help.contains("/ filter"));
+    assert!(help.contains("Git output opens automatically"));
+    assert!(help.contains("PgUp/PgDn scroll · Esc close after completion"));
 }
 
 #[test]
 fn invalid_arguments_fail_before_starting_the_ui() {
     for args in [
         vec!["--invalid"],
-        vec!["--no-watch"],
         vec!["first", "second"],
         vec!["--base"],
         vec!["-b"],

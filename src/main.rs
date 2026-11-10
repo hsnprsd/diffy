@@ -3,6 +3,7 @@ mod diff;
 mod editor;
 mod git;
 mod highlight;
+mod operation;
 mod ui;
 mod watch;
 
@@ -39,6 +40,7 @@ fn main() -> Result<()> {
                  Keys: ←/→/Tab focus · ↑/↓/j/k move · s changes/branch view\n\
                        Space stage/unstage file or hunk · c commit · p pull · P push\n\
                        e edit in $EDITOR · b select base branch · [/] hunks · ? help · q quit\n\n\
+                 Git output opens automatically: ↑/↓ or PgUp/PgDn scroll · Esc close after completion.\n\
                  Commit popup: Ctrl+S commit · Enter newline · Esc cancel.\n\
                  Pull is fast-forward only. Staging/unstaging never changes working-tree files."
             );

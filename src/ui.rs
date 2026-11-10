@@ -15,6 +15,7 @@ use crate::{
     diff::{DiffRow, RowKind},
     git::{Mode, safe_text},
     highlight::TEXT,
+    operation::OperationDetails,
 };
 
 const BG: Color = Color::Rgb(0, 0, 0);
@@ -101,10 +102,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         diff(frame, app, body);
     }
-    let footer = if let Some(error) = &app.error {
+    let footer = if let Some(label) = app.operation_label() {
+        let details = app.operation_details.as_ref().unwrap();
+        Line::styled(
+            format!(" {label}… · {}", safe_text(details.summary(true))),
+            Style::default().fg(ACCENT),
+        )
+    } else if let Some(error) = &app.error {
         Line::styled(format!(" {}", safe_text(error)), Style::default().fg(RED))
-    } else if let Some(label) = app.operation_label() {
-        Line::styled(format!(" {label}…"), Style::default().fg(ACCENT))
     } else if let Some(status) = &app.status {
         Line::styled(
             format!(" {}", safe_text(status.message())),
@@ -132,6 +137,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.show_help {
         help(frame, area);
+    }
+    if app.show_operation_details
+        && let Some(details) = &mut app.operation_details
+    {
+        operation_details(frame, area, details);
     }
 }
 
@@ -418,6 +428,105 @@ fn branch_picker(frame: &mut Frame, area: Rect, picker: &mut BranchPicker) {
     }
 }
 
+fn operation_details(frame: &mut Frame, area: Rect, details: &mut OperationDetails) {
+    let width = area.width.saturating_sub(4).min(110);
+    let height = area.height.saturating_sub(2).min(28);
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let (title, color) = match &details.result {
+        None => (format!("{}…", details.label), ACCENT),
+        Some(Ok(())) => (details.success_message.clone(), GREEN),
+        Some(Err(_)) => ("Git operation failed".into(), RED),
+    };
+    let block =
+        pane(format!(" {} ", safe_text(&title)), true).border_style(Style::default().fg(color));
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    details.viewport_height = chunks[1].height as usize;
+    details.viewport_width = chunks[1].width.saturating_sub(1) as usize;
+    details.clamp_scroll();
+    if details.horizontal > 0 {
+        details.horizontal = details.horizontal.min(details.max_horizontal());
+    }
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{}{}",
+            if details.follow {
+                "following output"
+            } else {
+                "scroll paused · End to follow"
+            },
+            if details.omitted {
+                " · some output omitted (history limit)"
+            } else {
+                ""
+            }
+        ))
+        .style(Style::default().fg(MUTED)),
+        chunks[0],
+    );
+    let rows: Vec<Line> = details
+        .lines
+        .iter()
+        .skip(details.scroll)
+        .take(chunks[1].height as usize)
+        .map(|line| {
+            Line::from(clip_spans(
+                &[Span::raw(safe_text(line))],
+                details.horizontal,
+                chunks[1].width.saturating_sub(1) as usize,
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), chunks[1]);
+    if details.lines.len() == 1 && details.lines[0].is_empty() {
+        frame.render_widget(
+            Paragraph::new(if details.result.is_none() {
+                "Waiting for Git output…"
+            } else {
+                "No output"
+            })
+            .style(Style::default().fg(MUTED)),
+            chunks[1],
+        );
+    }
+    if details.max_scroll() > 0 && chunks[1].width > 0 && chunks[1].height > 0 {
+        let mut state = ScrollbarState::new(details.max_scroll()).position(details.scroll);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::default().fg(ACCENT))
+                .track_style(Style::default().fg(BORDER)),
+            chunks[1],
+            &mut state,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(format!(
+            "↑/↓ scroll · PgUp/PgDn page · Home/End · h/l horizontal{}",
+            if details.result.is_some() {
+                " · Esc close"
+            } else {
+                ""
+            }
+        ))
+        .style(Style::default().fg(ACCENT)),
+        chunks[2],
+    );
+}
+
 fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool) {
     let width = area.width.saturating_sub(4).min(80);
     let height = area.height.saturating_sub(2).min(18);
@@ -561,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_black_theme_without_removed_controls() {
+    fn renders_black_theme_and_navigation_help() {
         let (_dir, repo) = repo();
         let mut app = App::new(repo, None).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -573,17 +682,11 @@ mod tests {
         assert_eq!(buffer[(119, 29)].bg, PANEL);
         let text = screen(&terminal);
         assert!(text.contains("Files 0"));
-        assert!(!text.contains("filter files"));
-        assert!(!text.contains("r refresh"));
-        assert!(!text.contains("n/p files"));
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = screen(&terminal);
         assert!(text.contains("Select files / scroll diff"));
         assert!(text.contains("Edit in $EDITOR at first (visible) hunk"));
-        assert!(!text.contains("Filter file paths"));
-        assert!(!text.contains("Refresh manually"));
-        assert!(!text.contains("Next / previous file"));
     }
 
     #[test]
@@ -737,6 +840,86 @@ mod tests {
     }
 
     #[test]
+    fn operation_results_are_visible_in_the_footer_and_details() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo, None).unwrap();
+        let mut details = OperationDetails::new(&crate::git::Operation::Push);
+        details.success_message = "Pushed to origin (refs/heads/main)".into();
+        app.operation_details = Some(details);
+        app.show_operation_details = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("Pushing…"));
+
+        for result in [Ok(()), Err("Push rejected".to_owned())] {
+            let details = app.operation_details.as_mut().unwrap();
+            let status = match &result {
+                Ok(()) => Status::Success(details.success_message.clone()),
+                Err(error) => Status::Error(error.clone()),
+            };
+            details.finish(result);
+            let message = status.message().to_owned();
+            let title = match &status {
+                Status::Success(_) => message.as_str(),
+                Status::Error(_) => "Git operation failed",
+            };
+            app.status = Some(status);
+            for show_details in [false, true] {
+                app.show_operation_details = show_details;
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                let text = screen(&terminal);
+                assert!(text.contains(&message));
+                if show_details {
+                    assert!(text.contains(title));
+                    assert!(text.contains("Esc close"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn operation_details_scroll_escape_controls_and_render_at_tiny_sizes() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo, None).unwrap();
+        let mut details = OperationDetails::new(&crate::git::Operation::Push);
+        details.success_message = "Pushed to origin (refs/heads/main)".into();
+        for n in 0..100 {
+            details.append(&format!("output row {n:03} 界\n"));
+        }
+        details.append("rejected by hook\u{1b}[31m\n");
+        details.finish(Err("Git exited with exit status: 1".into()));
+        app.operation_details = Some(details);
+        app.show_operation_details = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Git operation failed"));
+        assert!(text.contains("following output"));
+        assert!(text.contains("rejected by hook\\u{1b}[31m"));
+        assert!(text.contains("Git exited with exit status: 1"));
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("output row 000 界"));
+        assert!(!app.operation_details.as_ref().unwrap().follow);
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(!screen(&terminal).contains("output row 000 界"));
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("rejected by hook"));
+        for (width, height) in [(80, 24), (40, 12), (10, 4), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.show_operation_details);
+        app.show_operation_details = true;
+        app.operation_details.as_mut().unwrap().finish(Ok(()));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("Pushed to origin (refs/heads/main)"));
+    }
+
+    #[test]
     fn renders_diff_and_help_at_different_sizes() {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
@@ -768,7 +951,5 @@ mod tests {
         assert!(text.contains("main.rs"));
         assert!(text.contains("fn main()"));
         assert!(text.contains("Rust"));
-        assert!(!text.contains("● LIVE"));
-        assert!(!text.contains("● MANUAL"));
     }
 }

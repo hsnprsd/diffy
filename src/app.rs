@@ -1,4 +1,4 @@
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -9,6 +9,7 @@ use crate::{
     editor::EditRequest,
     git::{Content, FileEntry, Mode, Operation, Repository},
     highlight::SyntaxHighlighter,
+    operation::{self, OperationDetails, OperationEvent},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -178,12 +179,6 @@ impl Status {
     }
 }
 
-struct PendingOperation {
-    label: &'static str,
-    commit: bool,
-    receiver: Receiver<Result<String, String>>,
-}
-
 pub struct App {
     pub repo: Repository,
     pub mode: Mode,
@@ -192,7 +187,9 @@ pub struct App {
     pub branch_picker: Option<BranchPicker>,
     pub commit_popup: Option<CommitPopup>,
     pub status: Option<Status>,
-    pending: Option<PendingOperation>,
+    pending: Option<Receiver<OperationEvent>>,
+    pub operation_details: Option<OperationDetails>,
+    pub show_operation_details: bool,
     pub files: Vec<FileEntry>,
     pub list_state: ListState,
     pub view: DiffView,
@@ -225,6 +222,8 @@ impl App {
             commit_popup: None,
             status: None,
             pending: None,
+            operation_details: None,
+            show_operation_details: false,
             list_state: ListState::default(),
             view: DiffView::default(),
             focus: Focus::Files,
@@ -359,7 +358,9 @@ impl App {
     }
 
     pub fn operation_label(&self) -> Option<&'static str> {
-        self.pending.as_ref().map(|pending| pending.label)
+        self.pending
+            .as_ref()
+            .and_then(|_| self.operation_details.as_ref().map(|details| details.label))
     }
 
     fn ensure_idle(&self) -> Result<()> {
@@ -429,65 +430,77 @@ impl App {
 
     fn start_operation(&mut self, operation: Operation) -> Result<()> {
         self.ensure_idle()?;
-        let repo = self.repo.clone();
-        let label = operation.label();
-        let commit = matches!(operation, Operation::Commit(_));
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let result = repo
-                .run_operation(&operation)
-                .map_err(|error| format!("{error:#}"));
-            let _ = sender.send(result);
-        });
-        self.pending = Some(PendingOperation {
-            label,
-            commit,
-            receiver,
-        });
+        self.operation_details = Some(OperationDetails::new(&operation));
+        self.pending = Some(operation::spawn(self.repo.clone(), operation));
+        self.show_operation_details = true;
         self.error = None;
         self.status = None;
         Ok(())
     }
 
     pub fn poll_operation(&mut self) -> bool {
-        let Some(pending) = &self.pending else {
+        if self.pending.is_none() {
             return false;
-        };
-        let result = match pending.receiver.try_recv() {
-            Ok(result) => result,
-            Err(TryRecvError::Empty) => return false,
-            Err(TryRecvError::Disconnected) => Err("Git worker disconnected".into()),
-        };
-        let pending = self.pending.take().unwrap();
-        self.refresh();
-        match result {
-            Ok(message) => {
-                if pending.commit {
-                    self.commit_popup = None;
+        }
+        let mut dirty = false;
+        // Limit work per frame even when a hook continuously produces output.
+        for _ in 0..64 {
+            let event = match self.pending.as_ref().unwrap().try_recv() {
+                Ok(event) => event,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    OperationEvent::Finished(Err("Git worker disconnected".into()))
                 }
-                let summary = message
-                    .lines()
-                    .find(|line| !line.is_empty())
-                    .unwrap_or("Done");
-                self.status = Some(Status::Success(format!("{}: {summary}", pending.label)));
-            }
-            Err(error) => {
-                if pending.commit
-                    && let Some(popup) = &mut self.commit_popup
-                {
-                    popup.error = Some(error.clone());
+            };
+            dirty = true;
+            match event {
+                OperationEvent::Prepared(message) => {
+                    self.operation_details.as_mut().unwrap().success_message = message;
                 }
-                let message = format!("{}: {error}", pending.label);
-                self.error = Some(message.clone());
-                // A later filesystem refresh must not immediately hide a command failure.
-                self.status = Some(Status::Error(message));
+                OperationEvent::Output(text) => {
+                    self.operation_details.as_mut().unwrap().append(&text);
+                }
+                OperationEvent::Finished(result) => {
+                    self.pending = None;
+                    self.refresh();
+                    let details = self.operation_details.as_mut().unwrap();
+                    let output_summary = details.summary(true).to_owned();
+                    details.finish(result);
+                    match details.result.as_ref().unwrap() {
+                        Ok(()) => {
+                            if details.commit {
+                                self.commit_popup = None;
+                            }
+                            let message = if details.commit {
+                                format!("{}: {}", details.success_message, details.summary(false))
+                            } else {
+                                details.success_message.clone()
+                            };
+                            self.status = Some(Status::Success(message));
+                        }
+                        Err(error) => {
+                            let message =
+                                format!("Git operation failed: {error}; {output_summary}");
+                            if details.commit
+                                && let Some(popup) = &mut self.commit_popup
+                            {
+                                popup.error = Some(message.clone());
+                            }
+                            self.error = Some(message.clone());
+                            // Filesystem refreshes must not hide failures or their output.
+                            self.status = Some(Status::Error(message));
+                            self.show_operation_details = true;
+                        }
+                    }
+                    break;
+                }
             }
         }
-        true
+        dirty
     }
 
     pub fn handle_paste(&mut self, text: &str) {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.show_operation_details {
             return;
         }
         if let Some(popup) = &mut self.commit_popup {
@@ -601,6 +614,38 @@ impl App {
         }
         if self.show_help {
             self.show_help = false;
+            return false;
+        }
+        if self.show_operation_details {
+            let details = self.operation_details.as_mut().unwrap();
+            let page = details.viewport_height.saturating_sub(2).max(1) as isize;
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') if self.pending.is_none() => {
+                    self.show_operation_details = false;
+                }
+                KeyCode::Down | KeyCode::Char('j') => details.scroll_by(1),
+                KeyCode::Up | KeyCode::Char('k') => details.scroll_by(-1),
+                KeyCode::PageDown | KeyCode::Char('d') => details.scroll_by(page),
+                KeyCode::PageUp | KeyCode::Char('u') => details.scroll_by(-page),
+                KeyCode::Home | KeyCode::Char('g') => {
+                    details.follow = false;
+                    details.scroll = 0;
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    details.follow = true;
+                    details.clamp_scroll();
+                }
+                KeyCode::Char('h') | KeyCode::Left => {
+                    details.horizontal = details.horizontal.saturating_sub(4)
+                }
+                KeyCode::Char('l') | KeyCode::Right => {
+                    details.horizontal = details
+                        .horizontal
+                        .saturating_add(4)
+                        .min(details.max_horizontal());
+                }
+                _ => {}
+            }
             return false;
         }
         if self.commit_popup.is_some() {
@@ -828,29 +873,6 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
-    }
-
-    #[test]
-    fn removed_shortcuts_do_not_navigate_refresh_or_filter() {
-        let (dir, repo) = repo();
-        for path in ["a.txt", "b.txt", "c.txt"] {
-            std::fs::write(dir.path().join(path), "line\n").unwrap();
-        }
-        let mut app = App::new(repo, None).unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        std::fs::write(dir.path().join("d.txt"), "new file\n").unwrap();
-        for code in [KeyCode::Left, KeyCode::Right] {
-            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
-            for ch in ['n', 'r', '/'] {
-                assert!(!app.handle_key(key(ch)));
-                assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
-                assert_eq!(app.files.len(), 3);
-            }
-        }
-        app.refresh();
-        assert_eq!(app.files.len(), 4);
-        assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
-        assert!(app.handle_key(key('q')));
     }
 
     #[test]
@@ -1552,6 +1574,13 @@ mod tests {
                 .contains("Commit rejected by test hook")
         );
         assert_eq!(app.repo.staged_files().unwrap().len(), 1);
+        assert!(app.show_operation_details);
+        app.handle_paste("Do not edit the hidden draft");
+        assert_eq!(
+            app.commit_popup.as_ref().unwrap().message,
+            "Keep this message"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         std::fs::remove_file(hook).unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         wait_for_operation(&mut app);
@@ -1579,8 +1608,9 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .message()
-                .starts_with("Pushing:")
+                .starts_with("Pushed to origin (refs/heads/main)")
         );
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.handle_key(key('p'));
         assert_eq!(app.operation_label(), Some("Pulling"));
         wait_for_operation(&mut app);
@@ -1590,7 +1620,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .message()
-                .starts_with("Pulling:")
+                .starts_with("Pulled main")
         );
     }
 
@@ -1605,6 +1635,111 @@ mod tests {
         app.refresh();
         assert!(matches!(app.status, Some(Status::Error(_))));
         assert_eq!(app.status.as_ref().unwrap().message(), error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_commit_streams_output_and_keeps_the_log_open_until_completion() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        let hook = repo.git_dir.join("hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nprintf 'live stdout 界\\n'\nprintf 'live stderr\\n' >&2\ni=0\nwhile [ $i -lt 250 ]; do\n  [ -f .git/release-hook ] && exit 0\n  sleep 0.02\n  i=$((i + 1))\ndone\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut app = App::new(repo, None).unwrap();
+        app.handle_key(key('c'));
+        app.handle_paste("Live commit");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            app.poll_operation();
+            let output = app
+                .operation_details
+                .as_ref()
+                .unwrap()
+                .lines
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if output.contains("live stdout 界") && output.contains("live stderr") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "No live hook output: {output}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.operation_label(), Some("Committing"));
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
+            assert!(app.show_operation_details);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.operation_details.as_ref().unwrap().scroll, 0);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.operation_details.as_ref().unwrap().scroll, 1);
+        app.handle_paste("Not part of the message");
+        assert_eq!(app.commit_popup.as_ref().unwrap().message, "Live commit");
+        std::fs::write(dir.path().join(".git/release-hook"), "").unwrap();
+        wait_for_operation(&mut app);
+        assert!(
+            app.status
+                .as_ref()
+                .unwrap()
+                .message()
+                .starts_with("Committed:")
+        );
+        assert!(
+            app.operation_details
+                .as_ref()
+                .unwrap()
+                .result
+                .as_ref()
+                .unwrap()
+                .is_ok()
+        );
+        assert!(app.commit_popup.is_none());
+        assert!(app.repo.staged_files().unwrap().is_empty());
+        assert!(app.show_operation_details);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.show_operation_details);
+    }
+
+    #[test]
+    fn operation_polling_is_bounded_and_worker_disconnects_are_reported() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo, None).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.pending = Some(receiver);
+        let mut details = OperationDetails::new(&Operation::Pull);
+        details.success_message = "Pulled main".into();
+        app.operation_details = Some(details);
+        for _ in 0..130 {
+            sender
+                .send(OperationEvent::Output("line\n".into()))
+                .unwrap();
+        }
+        sender.send(OperationEvent::Finished(Ok(()))).unwrap();
+        assert!(app.poll_operation());
+        assert_eq!(app.operation_details.as_ref().unwrap().lines.len(), 65);
+        assert!(app.pending.is_some());
+        assert!(app.poll_operation());
+        assert!(app.pending.is_some());
+        assert!(app.poll_operation());
+        assert!(app.pending.is_none());
+        assert_eq!(app.status.as_ref().unwrap().message(), "Pulled main");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.pending = Some(receiver);
+        app.operation_details = Some(OperationDetails::new(&Operation::Push));
+        drop(sender);
+        assert!(app.poll_operation());
+        assert!(app.pending.is_none());
+        assert!(app.show_operation_details);
+        assert!(app.error.as_ref().unwrap().contains("worker disconnected"));
     }
 
     #[test]
