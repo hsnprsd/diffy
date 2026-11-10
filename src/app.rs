@@ -196,7 +196,6 @@ pub struct App {
     pub view: DiffView,
     pub focus: Focus,
     pub scroll: usize,
-    pub horizontal: usize,
     pub viewport_height: usize,
     pub viewport_width: usize,
     pub show_help: bool,
@@ -229,7 +228,6 @@ impl App {
             view: DiffView::default(),
             focus: Focus::Files,
             scroll: 0,
-            horizontal: 0,
             viewport_height: 20,
             viewport_width: 80,
             show_help: false,
@@ -291,7 +289,6 @@ impl App {
                 != selected.as_ref().map(|(path, staged)| (path, *staged))
         {
             self.scroll = 0;
-            self.horizontal = 0;
         }
         self.load_selected();
         Ok(())
@@ -323,6 +320,7 @@ impl App {
                 "No changes — working tree/index is clean"
             });
             self.scroll = 0;
+            self.view.wrap(self.viewport_width);
             return;
         };
         match self
@@ -336,23 +334,41 @@ impl App {
                 self.error = Some(format!("{}: {error:#}", entry.path.display()));
             }
         }
+        self.view.wrap(self.viewport_width);
+        self.clamp_scroll();
+    }
+
+    pub fn resize_diff(&mut self, width: usize, height: usize) {
+        self.viewport_height = height;
+        if self.viewport_width != width {
+            let anchor = self.view.wrapped_rows.get(self.scroll).copied();
+            self.viewport_width = width;
+            self.view.wrap(width);
+            if let Some(anchor) = anchor {
+                self.scroll = self
+                    .view
+                    .wrapped_rows
+                    .partition_point(|row| (row.row, row.offset) <= (anchor.row, anchor.offset))
+                    .saturating_sub(1);
+            }
+        }
         self.clamp_scroll();
     }
 
     pub fn clamp_scroll(&mut self) {
         self.scroll = self.scroll.min(
             self.view
-                .rows
+                .wrapped_rows
                 .len()
                 .saturating_sub(self.viewport_height.max(1))
                 // Let every hunk reach the top, even when several fit in the viewport.
-                .max(self.view.hunks.last().copied().unwrap_or(0)),
+                .max(self.view.wrapped_hunks.last().copied().unwrap_or(0)),
         );
     }
 
     pub fn active_hunk(&self) -> usize {
         self.view
-            .hunks
+            .wrapped_hunks
             .iter()
             .rposition(|&row| row <= self.scroll)
             .unwrap_or(0)
@@ -584,7 +600,6 @@ impl App {
         if next != selected {
             self.list_state.select(Some(next));
             self.scroll = 0;
-            self.horizontal = 0;
             self.error = None;
             self.load_selected();
         }
@@ -603,13 +618,13 @@ impl App {
         self.focus = Focus::Diff;
         let target = if next {
             self.view
-                .hunks
+                .wrapped_hunks
                 .iter()
                 .copied()
                 .find(|&row| row > self.scroll)
         } else {
             self.view
-                .hunks
+                .wrapped_hunks
                 .iter()
                 .copied()
                 .rev()
@@ -780,10 +795,6 @@ impl App {
             }
             KeyCode::Home | KeyCode::Char('g') => self.vertical(-(isize::MAX)),
             KeyCode::End | KeyCode::Char('G') => self.vertical(isize::MAX),
-            KeyCode::Char('h') => self.horizontal = self.horizontal.saturating_sub(4),
-            KeyCode::Char('l') => {
-                self.horizontal = self.horizontal.saturating_add(4).min(self.max_horizontal())
-            }
             KeyCode::Char(']') => self.hunk(true),
             KeyCode::Char('[') => self.hunk(false),
             KeyCode::Char('s') => {
@@ -801,19 +812,6 @@ impl App {
             _ => {}
         }
         false
-    }
-
-    fn max_horizontal(&self) -> usize {
-        self.view
-            .rows
-            .iter()
-            .map(|row| row.spans.iter().map(|span| span.width()).sum::<usize>())
-            .max()
-            .unwrap_or(0)
-            .saturating_sub(
-                self.viewport_width
-                    .saturating_sub(2 * self.view.number_width.max(1) + 7),
-            )
     }
 }
 
@@ -835,8 +833,6 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), content).unwrap();
         std::fs::write(dir.path().join("b.txt"), "other\n").unwrap();
         let mut app = App::new(repo, None).unwrap();
-        app.handle_key(key('l'));
-        assert_eq!(app.horizontal, 4);
         app.scroll = 2;
         let selected = app.selected().unwrap().path.clone();
         for (code, focus) in [
@@ -851,11 +847,8 @@ mod tests {
             assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
             assert!(app.focus == focus);
             assert_eq!(app.selected().unwrap().path, selected);
-            assert_eq!(app.horizontal, 4);
             assert_eq!(app.scroll, 2);
         }
-        app.handle_key(key('h'));
-        assert_eq!(app.horizontal, 0);
     }
 
     #[test]
@@ -912,18 +905,15 @@ mod tests {
         let mut app = App::new(repo, None).unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.scroll = 2;
-        app.horizontal = 4;
         std::fs::write(dir.path().join("0.txt"), "new file\n").unwrap();
         app.refresh();
         assert_eq!(app.files.len(), 3);
         assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
         assert_eq!(app.scroll, 2);
-        assert_eq!(app.horizontal, 4);
         std::fs::remove_file(dir.path().join("b.txt")).unwrap();
         app.refresh();
         assert_eq!(app.selected().unwrap().path, PathBuf::from("0.txt"));
         assert_eq!(app.scroll, 0);
-        assert_eq!(app.horizontal, 0);
         for path in ["0.txt", "a.txt"] {
             std::fs::remove_file(dir.path().join(path)).unwrap();
         }
@@ -943,6 +933,87 @@ mod tests {
         }
         std::fs::write(dir.path().join("a file.txt"), new).unwrap();
         (dir, App::new(repo, None).unwrap())
+    }
+
+    #[test]
+    fn wrapped_hunks_keep_navigation_editing_and_staging_on_the_source_hunk() {
+        let (dir, mut app) = app_with_hunks();
+        let path = dir.path().join("a file.txt");
+        let content = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("changed 10", &"x".repeat(150))
+            .replace("changed 50", &"y".repeat(150));
+        std::fs::write(&path, content).unwrap();
+        app.refresh();
+        app.focus = Focus::Diff;
+        app.resize_diff(24, 4);
+        let second = app.view.wrapped_hunks[1];
+        assert!(second > app.view.hunks[1]);
+        app.handle_key(key(']'));
+        assert_eq!(app.scroll, second);
+        assert_eq!(app.active_hunk(), 1);
+
+        let continuation = app
+            .view
+            .wrapped_rows
+            .iter()
+            .position(|wrapped| {
+                app.view.rows[wrapped.row].new_line == Some(50) && wrapped.offset > 0
+            })
+            .unwrap();
+        app.scroll = continuation;
+        app.handle_key(key('j'));
+        assert_eq!(app.scroll, continuation + 1);
+        app.handle_key(key('k'));
+        assert_eq!(app.scroll, continuation);
+        app.handle_key(key('d'));
+        assert_eq!(app.scroll, continuation + 2);
+        app.handle_key(key('u'));
+        assert_eq!(app.scroll, continuation);
+        app.handle_key(key('e'));
+        assert_eq!(app.edit_request.take().unwrap().line, Some(47));
+        app.handle_key(key('['));
+        assert_eq!(app.scroll, second);
+        app.handle_key(key(']'));
+        assert_eq!(app.scroll, app.view.wrapped_hunks[2]);
+
+        app.scroll = continuation;
+        let expected = app
+            .view
+            .source
+            .as_ref()
+            .unwrap()
+            .0
+            .replace("line 50\n", &format!("{}\n", "y".repeat(150)));
+        app.handle_key(key(' '));
+        let staged = app.repo.staged_files().unwrap();
+        assert_eq!(staged.len(), 1);
+        let contents =
+            crate::git::tests::text(app.repo.contents(&staged[0], Mode::Changes).unwrap().1);
+        assert_eq!(contents, expected);
+    }
+
+    #[test]
+    fn resizing_wrapped_lines_keeps_the_source_position_visible() {
+        let (dir, repo) = repo();
+        std::fs::write(
+            dir.path().join("long.txt"),
+            format!("{}\n", "x".repeat(150)),
+        )
+        .unwrap();
+        let mut app = App::new(repo, None).unwrap();
+        app.resize_diff(24, 3);
+        app.scroll = 5;
+        let anchor = app.view.wrapped_rows[app.scroll];
+        assert_eq!((anchor.row, anchor.offset), (1, 60));
+        app.resize_diff(40, 3);
+        let visible = app.view.wrapped_rows[app.scroll];
+        assert_eq!(visible.row, anchor.row);
+        assert!(visible.offset <= anchor.offset && visible.offset + visible.width > anchor.offset);
+        assert_eq!(app.scroll, 2);
+        app.resize_diff(24, 3);
+        assert_eq!(app.view.wrapped_rows[app.scroll].row, anchor.row);
+        assert_eq!(app.view.wrapped_rows[app.scroll].offset, 30);
     }
 
     #[test]
@@ -1422,7 +1493,6 @@ mod tests {
         app.viewport_height = 4;
         app.handle_key(key(']'));
         app.handle_key(key('j'));
-        app.horizontal = 4;
         let scroll = app.scroll;
         let source = app.view.source.clone();
 
@@ -1438,7 +1508,6 @@ mod tests {
         assert!(app.selected().unwrap().staged);
         assert_eq!(app.view.source, source);
         assert_eq!(app.scroll, scroll);
-        assert_eq!(app.horizontal, 4);
 
         // Removing that staged entry keeps the file selected, not its old scroll.
         git(dir.path(), &["reset", "-q", "--", "a file.txt"]);
@@ -1447,7 +1516,6 @@ mod tests {
         assert_eq!(app.selected().unwrap().path, PathBuf::from("a file.txt"));
         assert!(!app.selected().unwrap().staged);
         assert_eq!(app.scroll, 0);
-        assert_eq!(app.horizontal, 0);
         assert_eq!(std::fs::read_to_string(path).unwrap(), working);
     }
 

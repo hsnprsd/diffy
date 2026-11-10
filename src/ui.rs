@@ -12,7 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, BranchPicker, CommitPopup, Focus, Status},
-    diff::{DiffRow, RowKind},
+    diff::{DiffRow, RowKind, WrappedRow},
     git::{Mode, safe_text},
     highlight::TEXT,
     operation::{OperationDetails, OperationResult},
@@ -221,6 +221,9 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         })
         .unwrap_or_else(|| app.mode.label().into());
+    let block = pane(format!(" {title} "), app.focus == Focus::Diff);
+    let inner = block.inner(area);
+    app.resize_diff(inner.width as usize, inner.height as usize);
     let language = app.view.language.map_or("Text", |language| language.name());
     let mut summary = Line::from(vec![
         Span::raw(format!(
@@ -252,30 +255,25 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(MUTED),
         ));
     }
-    let block = pane(format!(" {title} "), app.focus == Focus::Diff).title_bottom(summary);
-    let inner = block.inner(area);
-    app.viewport_height = inner.height as usize;
-    app.viewport_width = inner.width as usize;
-    app.clamp_scroll();
-    frame.render_widget(block, area);
+    frame.render_widget(block.title_bottom(summary), area);
     let rows: Vec<Line> = app
         .view
-        .rows
+        .wrapped_rows
         .iter()
         .skip(app.scroll)
         .take(inner.height as usize)
-        .map(|row| {
+        .map(|wrapped| {
             render_row(
-                row,
+                &app.view.rows[wrapped.row],
+                wrapped,
                 app.view.number_width.max(1),
-                app.horizontal,
                 inner.width as usize,
             )
         })
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
-    if app.view.rows.len() > inner.height as usize && area.width > 1 {
-        let mut state = ScrollbarState::new(app.view.rows.len())
+    if app.view.wrapped_rows.len() > inner.height as usize && area.width > 1 {
+        let mut state = ScrollbarState::new(app.view.wrapped_rows.len())
             .position(app.scroll)
             .viewport_content_length(inner.height as usize);
         frame.render_stateful_widget(
@@ -292,8 +290,8 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_row(
     row: &DiffRow,
+    wrapped: &WrappedRow,
     number_width: usize,
-    horizontal: usize,
     width: usize,
 ) -> Line<'static> {
     let (marker, fg, bg) = match row.kind {
@@ -303,20 +301,28 @@ fn render_row(
         RowKind::Note => (' ', MUTED, BG),
         RowKind::Context => (' ', MUTED, BG),
     };
+    let available = width
+        .saturating_sub(row.gutter_width(number_width))
+        .min(wrapped.width);
     if matches!(row.kind, RowKind::Hunk | RowKind::Note) {
         let mut spans = vec![Span::raw(" ")];
-        spans.extend(clip_spans(&row.spans, horizontal, width.saturating_sub(1)));
+        spans.extend(clip_spans(&row.spans, wrapped.offset, available));
         return Line::from(spans).style(Style::default().fg(fg).bg(bg));
     }
-    let number = |value: Option<usize>| value.map_or_else(String::new, |n| n.to_string());
+    let continuation = wrapped.offset > 0;
+    let number = |value: Option<usize>| {
+        value
+            .filter(|_| !continuation)
+            .map_or_else(String::new, |n| n.to_string())
+    };
+    let marker = if continuation { ' ' } else { marker };
     let gutter = format!(
         " {:>number_width$} {:>number_width$} │ {marker} ",
         number(row.old_line),
         number(row.new_line)
     );
-    let available = width.saturating_sub(gutter.width());
     let mut spans = vec![Span::styled(gutter, Style::default().fg(fg))];
-    spans.extend(clip_spans(&row.spans, horizontal, available));
+    spans.extend(clip_spans(&row.spans, wrapped.offset, available));
     Line::from(spans).style(Style::default().fg(TEXT).bg(bg))
 }
 
@@ -328,6 +334,7 @@ fn clip_spans(spans: &[Span<'_>], offset: usize, width: usize) -> Vec<Span<'stat
     let mut has_visible = false;
     for span in spans {
         let mut text = String::new();
+        let mut finished = false;
         for ch in span.content.chars() {
             let cells = ch.width().unwrap_or(0);
             if cells == 0 {
@@ -335,6 +342,10 @@ fn clip_spans(spans: &[Span<'_>], offset: usize, width: usize) -> Vec<Span<'stat
                     text.push(ch);
                 }
                 continue;
+            }
+            if column >= end {
+                finished = true;
+                break;
             }
             let next = column.saturating_add(cells);
             if column >= offset && next <= end {
@@ -349,7 +360,7 @@ fn clip_spans(spans: &[Span<'_>], offset: usize, width: usize) -> Vec<Span<'stat
         if !text.is_empty() {
             result.push(Span::styled(text, span.style));
         }
-        if column >= end {
+        if finished {
             break;
         }
     }
@@ -622,7 +633,6 @@ fn help(frame: &mut Frame, area: Rect) {
         Line::raw("c                   Commit staged changes (message popup)"),
         Line::raw("p / P               Pull (fast-forward only) / push branch"),
         Line::raw("e                   Edit in $EDITOR at first (visible) hunk"),
-        Line::raw("h/l                 Scroll code horizontally"),
         Line::raw("PgUp/PgDn or u/d    Page up / down"),
         Line::raw("Home/End or g/G     First / last row or file"),
         Line::raw("[ / ]               Previous / next hunk"),
@@ -694,6 +704,77 @@ mod tests {
         let text = screen(&terminal);
         assert!(text.contains("Select files / scroll diff"));
         assert!(text.contains("Edit in $EDITOR at first (visible) hunk"));
+    }
+
+    #[test]
+    fn wrapped_rows_keep_styles_and_only_number_the_first_segment() {
+        for (kind, marker, bg) in [
+            (RowKind::Added, '+', ADD_BG),
+            (RowKind::Removed, '-', DEL_BG),
+            (RowKind::Context, ' ', BG),
+        ] {
+            let mut view = crate::diff::DiffView {
+                rows: vec![DiffRow {
+                    kind,
+                    old_line: Some(1),
+                    new_line: Some(1),
+                    spans: vec![
+                        Span::styled("abcd", Style::default().fg(RED)),
+                        Span::styled("\u{301}界ef", Style::default().fg(ACCENT)),
+                    ],
+                }],
+                number_width: 1,
+                ..crate::diff::DiffView::default()
+            };
+            view.wrap(13);
+            let lines: Vec<_> = view
+                .wrapped_rows
+                .iter()
+                .map(|wrapped| render_row(&view.rows[wrapped.row], wrapped, 1, 13))
+                .collect();
+            assert_eq!(lines.len(), 2);
+            assert_eq!(lines[0].to_string(), format!(" 1 1 │ {marker} abcd\u{301}"));
+            assert_eq!(lines[1].to_string(), "     │   界ef");
+            assert_eq!(lines[0].spans[1].style.fg, Some(RED));
+            assert_eq!(lines[0].spans[2].style.fg, Some(ACCENT));
+            assert_eq!(lines[1].spans[1].style.fg, Some(ACCENT));
+            for line in lines {
+                assert_eq!(line.style.bg, Some(bg));
+                assert_eq!(line.width(), 13);
+            }
+        }
+    }
+
+    #[test]
+    fn long_lines_scroll_through_continuations_to_the_end() {
+        let (dir, repo) = repo();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            format!("{}TAIL\nEND\n", "a".repeat(90)),
+        )
+        .unwrap();
+        let mut app = App::new(repo, None).unwrap();
+        app.focus = Focus::Diff;
+        let mut terminal = Terminal::new(TestBackend::new(29, 9)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_eq!(app.viewport_height, 4);
+        assert_eq!(app.view.wrapped_rows.len(), 8);
+        let text = screen(&terminal);
+        assert!(text.contains("   1 │ + aaaaaaaaaaaaaaaaaa"));
+        assert!(text.contains("     │   aaaaaaaaaaaaaaaaaa"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_eq!(app.scroll, 2);
+        assert!(screen(&terminal).contains("     │   aaaaaaaaaaaaaaaaaa"));
+
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_eq!(app.scroll, 4);
+        let text = screen(&terminal);
+        assert!(text.contains("     │   TAIL"));
+        assert!(text.contains("   2 │ + END"));
     }
 
     #[test]

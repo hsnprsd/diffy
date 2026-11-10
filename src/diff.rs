@@ -3,6 +3,7 @@ use std::{path::Path, time::Duration};
 use anyhow::Result;
 use ratatui::text::Span;
 use similar::{Algorithm, ChangeTag, TextDiff};
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
     git::Content,
@@ -27,10 +28,19 @@ pub struct DiffRow {
     pub spans: Vec<Span<'static>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WrappedRow {
+    pub row: usize,
+    pub offset: usize,
+    pub width: usize,
+}
+
 #[derive(Default)]
 pub struct DiffView {
     pub rows: Vec<DiffRow>,
     pub hunks: Vec<usize>,
+    pub wrapped_rows: Vec<WrappedRow>,
+    pub wrapped_hunks: Vec<usize>,
     pub patches: Vec<String>,
     pub source: Option<(String, String)>,
     pub additions: usize,
@@ -40,6 +50,36 @@ pub struct DiffView {
 }
 
 impl DiffView {
+    /// Lay out terminal-cell ranges without splitting wide characters or their combining marks.
+    pub fn wrap(&mut self, width: usize) {
+        self.wrapped_rows.clear();
+        self.wrapped_hunks.clear();
+        for (row, source) in self.rows.iter().enumerate() {
+            if source.kind == RowKind::Hunk {
+                self.wrapped_hunks.push(self.wrapped_rows.len());
+            }
+            let available = width.saturating_sub(source.gutter_width(self.number_width));
+            let mut wrapped = WrappedRow {
+                row,
+                offset: 0,
+                width: 0,
+            };
+            if available > 0 {
+                for ch in source.spans.iter().flat_map(|span| span.content.chars()) {
+                    let cells = ch.width().unwrap_or(0);
+                    if cells > 0 && wrapped.width > 0 && wrapped.width + cells > available {
+                        self.wrapped_rows.push(wrapped);
+                        wrapped.offset += wrapped.width;
+                        wrapped.width = 0;
+                    }
+                    wrapped.width += cells;
+                }
+            }
+            // Empty source lines still occupy one screen row.
+            self.wrapped_rows.push(wrapped);
+        }
+    }
+
     pub fn notice(message: impl Into<String>) -> Self {
         Self {
             rows: vec![DiffRow::note(message)],
@@ -150,6 +190,14 @@ impl DiffView {
 }
 
 impl DiffRow {
+    pub fn gutter_width(&self, number_width: usize) -> usize {
+        if matches!(self.kind, RowKind::Hunk | RowKind::Note) {
+            1
+        } else {
+            2 * number_width.max(1) + 7
+        }
+    }
+
     fn note(message: impl Into<String>) -> Self {
         Self {
             kind: RowKind::Note,
@@ -172,6 +220,79 @@ mod tests {
             &mut SyntaxHighlighter::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn wraps_terminal_cells_across_spans_and_keeps_empty_lines() {
+        let mut view = DiffView {
+            rows: vec![DiffRow {
+                kind: RowKind::Added,
+                old_line: None,
+                new_line: Some(1),
+                spans: vec![Span::raw("abc"), Span::raw("\u{301}界def")],
+            }],
+            number_width: 1,
+            ..DiffView::default()
+        };
+        view.wrap(13); // Four code cells after the gutter.
+        assert_eq!(
+            view.wrapped_rows,
+            [
+                WrappedRow {
+                    row: 0,
+                    offset: 0,
+                    width: 3
+                },
+                WrappedRow {
+                    row: 0,
+                    offset: 3,
+                    width: 4
+                },
+                WrappedRow {
+                    row: 0,
+                    offset: 7,
+                    width: 1
+                },
+            ]
+        );
+        view.rows[0].spans.clear();
+        view.wrap(13);
+        assert_eq!(
+            view.wrapped_rows,
+            [WrappedRow {
+                row: 0,
+                offset: 0,
+                width: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn exact_width_lines_and_tiny_panes_have_one_row() {
+        let mut view = DiffView::notice("abcd");
+        for width in [5, 0, 1] {
+            view.wrap(width);
+            assert_eq!(view.wrapped_rows.len(), 1);
+            assert_eq!(view.wrapped_rows[0].offset, 0);
+        }
+        view.wrap(2);
+        assert_eq!(view.wrapped_rows.len(), 4);
+        view.rows[0].spans = vec![Span::raw("界界")];
+        view.wrap(2);
+        assert_eq!(view.wrapped_rows.len(), 2);
+        assert_eq!(view.wrapped_rows[1].offset, 2);
+    }
+
+    #[test]
+    fn wrapping_maps_hunks_without_changing_source_rows_or_patches() {
+        let mut view = build("", "abcdefghijklmnop\n");
+        let patches = view.patches.clone();
+        view.wrap(13);
+        assert_eq!(view.wrapped_hunks, [0]);
+        assert_eq!(view.wrapped_rows.len(), 6); // Two header rows and four code rows.
+        assert_eq!(view.wrapped_rows[2].row, view.hunks[0] + 1);
+        assert_eq!(view.rows.len(), 2);
+        assert_eq!(view.patches, patches);
     }
 
     #[test]

@@ -9,7 +9,7 @@ Ratatui, Tree-sitter, and native filesystem notifications.
 - **Live updates:** edits, creates, deletes, renames, staging, commits, and branch
   changes trigger a debounced refresh. Selection and scroll position are preserved
   where possible. Git object writes and file-access events are ignored.
-- **File sidebar:** status indicators, file/hunk navigation, horizontal scrolling
+- **File sidebar:** status indicators, file/hunk navigation, wrapped diff lines
   with fixed gutters, and a compact single-pane layout for narrow terminals.
 - **Black dark theme:** true-black panes, subtle charcoal panels, and colored diff
   highlights.
@@ -117,7 +117,6 @@ fetches from its upstream), or fetch other remotes outside diffy when needed.
 | `p` / `P` | Pull (fast-forward only) / push the current branch |
 | `Esc` | Cancel a running commit, pull, or push; close its output after completion |
 | `e` | Open in `$EDITOR` at the first visible hunk (Diff pane) or first file hunk (Files pane) |
-| `h` / `l` | Scroll code horizontally |
 | `PageUp` / `PageDown`, `u` / `d` | Page up / down |
 | `Home` / `End`, `g` / `G` | First / last row or file |
 | `[` / `]` | Previous / next hunk |
@@ -125,6 +124,11 @@ fetches from its upstream), or fetch other remotes outside diffy when needed.
 | `b` | Select the base branch from a searchable list and open the branch comparison |
 | `?` / `F1` | Help (any key closes it) |
 | `q` / `Ctrl+C` | Quit |
+
+Long diff lines wrap automatically to the pane width, preserving highlighting and
+keeping continuation lines aligned beneath the code. Line numbers and change
+markers appear only on the first screen row of each source line. Scrolling and
+paging move through screen rows, including wrapped continuations.
 
 Below 80 columns, only the focused pane is shown; `←` / `→` or `Tab` switches panes.
 
@@ -226,7 +230,7 @@ Bundled grammars: **Rust, Python, JavaScript, JSX, TypeScript, TSX, Go, C, C++,
 JSON, HTML, CSS, and Bash**. Languages are detected from file extensions (and
 common Bash dotfile names). Unknown languages are displayed as plain text;
 embedded-language injections are not currently highlighted. Tabs use four-column
-stops and horizontal scrolling accounts for wide Unicode characters.
+stops, and line wrapping keeps wide Unicode characters intact.
 
 ## Limits and troubleshooting
 
