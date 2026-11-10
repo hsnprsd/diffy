@@ -1,4 +1,4 @@
-use std::sync::mpsc::TryRecvError;
+use std::{path::PathBuf, sync::mpsc::TryRecvError};
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -7,7 +7,7 @@ use ratatui::widgets::ListState;
 use crate::{
     diff::DiffView,
     editor::EditRequest,
-    git::{Content, FileEntry, Operation, Repository},
+    git::{Content, FileEntry, Operation, Repository, Worktree},
     highlight::SyntaxHighlighter,
     operation::{self, OperationDetails, OperationEvent, OperationHandle, OperationResult},
 };
@@ -106,6 +106,14 @@ impl CommitPopup {
     }
 }
 
+pub struct WorktreePopup {
+    pub worktrees: Vec<Worktree>,
+    pub list_state: ListState,
+    pub viewport_height: usize,
+    pub error: Option<String>,
+    pub removal: Option<Worktree>,
+}
+
 pub enum Status {
     Success(String),
     Error(String),
@@ -124,6 +132,8 @@ pub struct App {
     pub repo: Repository,
     pub branch: String,
     pub commit_popup: Option<CommitPopup>,
+    pub worktree_popup: Option<WorktreePopup>,
+    pub worktree_request: Option<PathBuf>,
     pub status: Option<Status>,
     pending: Option<OperationHandle>,
     pub operation_details: Option<OperationDetails>,
@@ -150,6 +160,8 @@ impl App {
             branch,
             files,
             commit_popup: None,
+            worktree_popup: None,
+            worktree_request: None,
             status: None,
             pending: None,
             operation_details: None,
@@ -332,6 +344,119 @@ impl App {
         Ok(())
     }
 
+    fn open_worktrees(&mut self) -> Result<()> {
+        self.ensure_idle()?;
+        let worktrees = self.repo.worktrees()?;
+        let selected = self
+            .worktree_popup
+            .as_ref()
+            .and_then(|popup| {
+                popup
+                    .list_state
+                    .selected()
+                    .and_then(|i| popup.worktrees.get(i))
+            })
+            .map_or(&self.repo.root, |worktree| &worktree.path);
+        let position = worktrees
+            .iter()
+            .position(|worktree| &worktree.path == selected);
+        let mut list_state = ListState::default();
+        list_state.select(position.or_else(|| (!worktrees.is_empty()).then_some(0)));
+        self.worktree_popup = Some(WorktreePopup {
+            worktrees,
+            list_state,
+            viewport_height: 10,
+            error: None,
+            removal: None,
+        });
+        self.error = None;
+        Ok(())
+    }
+
+    fn confirm_worktree_removal(&mut self) -> Result<()> {
+        self.ensure_idle()?;
+        let popup = self.worktree_popup.as_ref().unwrap();
+        let selected = popup
+            .list_state
+            .selected()
+            .and_then(|i| popup.worktrees.get(i))
+            .context("No worktree selected")?;
+        let worktree = self.repo.removable_worktree(&selected.path)?;
+        let popup = self.worktree_popup.as_mut().unwrap();
+        popup.removal = Some(worktree);
+        popup.error = None;
+        Ok(())
+    }
+
+    fn handle_worktree_key(&mut self, key: KeyEvent) {
+        let popup = self.worktree_popup.as_mut().unwrap();
+        if popup.removal.is_some() {
+            match key.code {
+                KeyCode::Char('y') => {
+                    let worktree = popup.removal.take().unwrap();
+                    if let Err(error) =
+                        self.start_operation(Operation::RemoveWorktree(worktree.path))
+                    {
+                        self.worktree_popup.as_mut().unwrap().error = Some(format!("{error:#}"));
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'q' | 'w') => popup.removal = None,
+                _ => {}
+            }
+            return;
+        }
+        let page = popup.viewport_height.max(1) as isize;
+        let delta = match key.code {
+            KeyCode::Esc | KeyCode::Char('q' | 'w') => {
+                self.worktree_popup = None;
+                return;
+            }
+            KeyCode::Enter => {
+                if let Some(worktree) = popup
+                    .list_state
+                    .selected()
+                    .and_then(|i| popup.worktrees.get(i))
+                {
+                    if worktree.path == self.repo.root {
+                        self.worktree_popup = None;
+                    } else {
+                        self.worktree_request = Some(worktree.path.clone());
+                    }
+                }
+                return;
+            }
+            KeyCode::Delete | KeyCode::Char('D') => {
+                if let Err(error) = self.confirm_worktree_removal() {
+                    self.worktree_popup.as_mut().unwrap().error =
+                        Some(format!("Delete worktree: {error:#}"));
+                }
+                return;
+            }
+            KeyCode::Char('r') => {
+                if let Err(error) = self.open_worktrees() {
+                    self.worktree_popup.as_mut().unwrap().error = Some(format!("{error:#}"));
+                }
+                return;
+            }
+            KeyCode::Down | KeyCode::Char('j') => 1,
+            KeyCode::Up | KeyCode::Char('k') => -1,
+            KeyCode::PageDown | KeyCode::Char('d') => page,
+            KeyCode::PageUp | KeyCode::Char('u') => -page,
+            KeyCode::Home | KeyCode::Char('g') => -isize::MAX,
+            KeyCode::End | KeyCode::Char('G') => isize::MAX,
+            _ => return,
+        };
+        if !popup.worktrees.is_empty() {
+            let selected = popup.list_state.selected().unwrap_or(0);
+            popup.list_state.select(Some(
+                selected
+                    .saturating_add_signed(delta)
+                    .min(popup.worktrees.len() - 1),
+            ));
+            popup.error = None;
+        }
+    }
+
     fn open_commit(&mut self) -> Result<()> {
         self.ensure_idle()?;
         anyhow::ensure!(!self.repo.files()?.is_empty(), "No changes to commit");
@@ -375,6 +500,12 @@ impl App {
                 OperationEvent::Finished(result) => {
                     self.pending = None;
                     self.refresh();
+                    if self.operation_details.as_ref().unwrap().worktree_removal
+                        && let Err(error) = self.open_worktrees()
+                    {
+                        self.worktree_popup.as_mut().unwrap().error =
+                            Some(format!("Refresh: {error:#}"));
+                    }
                     let details = self.operation_details.as_mut().unwrap();
                     let output_summary = details.summary(true).to_owned();
                     details.finish(result);
@@ -593,7 +724,16 @@ impl App {
             }
             return false;
         }
+        if self.worktree_popup.is_some() {
+            self.handle_worktree_key(key);
+            return false;
+        }
         match key.code {
+            KeyCode::Char('w') => {
+                if let Err(error) = self.open_worktrees() {
+                    self.error = Some(format!("Worktrees: {error:#}"));
+                }
+            }
             KeyCode::Char('q') => {
                 if let Err(error) = self.ensure_idle() {
                     self.error = Some(error.to_string());
@@ -1688,6 +1828,254 @@ mod tests {
         assert!(app.pending.is_none());
         assert!(app.show_operation_details);
         assert!(app.error.as_ref().unwrap().contains("worker disconnected"));
+    }
+
+    #[test]
+    fn worktree_picker_is_modal_and_requests_a_switch_without_changing_the_repository() {
+        let (_dir, _linked, repo, linked_repo) = crate::git::tests::linked_repo();
+        std::fs::write(repo.root.join("main.txt"), "main changes\n").unwrap();
+        let mut app = App::new(repo).unwrap();
+        app.handle_key(key('w'));
+        assert_eq!(
+            app.worktree_popup.as_ref().unwrap().list_state.selected(),
+            Some(0)
+        );
+        for ch in [' ', 'c', 'e', 'p', 'P', '?'] {
+            assert!(!app.handle_key(key(ch)));
+        }
+        app.handle_paste("ignored while choosing a worktree");
+        assert_eq!(app.branch, "main");
+        assert_eq!(app.selected().unwrap().path, PathBuf::from("main.txt"));
+        assert_eq!(app.repo.files().unwrap().len(), 1);
+        assert!(!app.repo.files().unwrap()[0].staged);
+        assert!(app.commit_popup.is_none());
+        assert!(app.edit_request.is_none());
+        assert!(app.pending.is_none());
+        assert!(!app.show_help);
+
+        app.handle_key(key('j'));
+        assert_eq!(
+            app.worktree_popup.as_ref().unwrap().list_state.selected(),
+            Some(1)
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.worktree_request.take(), Some(linked_repo.root));
+        assert_eq!(app.branch, "main"); // The event loop installs the watcher before switching.
+        assert!(app.worktree_popup.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.worktree_popup.is_none());
+        assert_eq!(app.selected().unwrap().path, PathBuf::from("main.txt"));
+        assert!(!app.handle_key(key('w')));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.worktree_popup.is_none()); // Choosing the active worktree is a no-op.
+        assert!(app.worktree_request.is_none());
+    }
+
+    #[test]
+    fn worktree_picker_refreshes_and_navigates_from_a_linked_worktree() {
+        let (dir, linked, repo, linked_repo) = crate::git::tests::linked_repo();
+        let mut app = App::new(linked_repo).unwrap();
+        app.handle_key(key('w'));
+        assert_eq!(
+            app.worktree_popup.as_ref().unwrap().list_state.selected(),
+            Some(1)
+        );
+        let added = linked.path().join("another");
+        git(
+            dir.path(),
+            &["worktree", "add", "-b", "another", added.to_str().unwrap()],
+        );
+        app.handle_key(key('r'));
+        let popup = app.worktree_popup.as_ref().unwrap();
+        assert_eq!(popup.worktrees.len(), 3);
+        assert_eq!(
+            popup.worktrees[popup.list_state.selected().unwrap()].path,
+            app.repo.root
+        );
+        for (code, expected) in [
+            (KeyCode::Home, 0),
+            (KeyCode::Up, 0),
+            (KeyCode::End, 2),
+            (KeyCode::Down, 2),
+            (KeyCode::PageUp, 0),
+            (KeyCode::PageDown, 2),
+            (KeyCode::Char('g'), 0),
+            (KeyCode::Char('j'), 1),
+            (KeyCode::Char('k'), 0),
+            (KeyCode::Char('G'), 2),
+            (KeyCode::Char('u'), 0),
+            (KeyCode::Char('d'), 2),
+        ] {
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+            assert_eq!(
+                app.worktree_popup.as_ref().unwrap().list_state.selected(),
+                Some(expected)
+            );
+        }
+        app.handle_key(key('g'));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.worktree_request.take(), Some(repo.root));
+        assert!(!app.handle_key(key('q')));
+        assert!(app.worktree_popup.is_none());
+    }
+
+    #[test]
+    fn worktree_deletion_requires_confirmation_and_refreshes_the_picker() {
+        let (dir, _linked, repo, linked_repo) = crate::git::tests::linked_repo();
+        std::fs::write(repo.root.join("main.txt"), "main changes\n").unwrap();
+        let mut app = App::new(repo).unwrap();
+        app.handle_key(key('w'));
+        app.handle_key(key('D'));
+        assert!(
+            app.worktree_popup
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("current worktree")
+        );
+        assert!(app.worktree_popup.as_ref().unwrap().removal.is_none());
+        app.handle_key(key('j'));
+        for cancel in [KeyCode::Esc, KeyCode::Char('n')] {
+            app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+            assert_eq!(
+                app.worktree_popup
+                    .as_ref()
+                    .unwrap()
+                    .removal
+                    .as_ref()
+                    .unwrap()
+                    .path,
+                linked_repo.root
+            );
+            for code in [
+                KeyCode::Enter,
+                KeyCode::Down,
+                KeyCode::Char('r'),
+                KeyCode::Char(' '),
+            ] {
+                app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+            }
+            assert!(linked_repo.root.is_dir());
+            assert_eq!(app.worktree_popup.as_ref().unwrap().worktrees.len(), 2);
+            assert_eq!(
+                app.worktree_popup.as_ref().unwrap().list_state.selected(),
+                Some(1)
+            );
+            assert!(app.pending.is_none());
+            assert!(app.worktree_request.is_none());
+            app.handle_key(KeyEvent::new(cancel, KeyModifiers::NONE));
+            assert!(app.worktree_popup.as_ref().unwrap().removal.is_none());
+            assert!(linked_repo.root.is_dir());
+        }
+        app.handle_key(key('D'));
+        app.handle_key(key('y'));
+        assert_eq!(app.operation_label(), Some("Removing worktree"));
+        assert!(app.show_operation_details);
+        assert!(!app.handle_key(key('q')));
+        wait_for_operation(&mut app);
+        assert_eq!(
+            app.operation_details.as_ref().unwrap().result,
+            Some(OperationResult::Success)
+        );
+        assert!(
+            app.status
+                .as_ref()
+                .unwrap()
+                .message()
+                .starts_with("Removed worktree ")
+        );
+        assert_eq!(app.worktree_popup.as_ref().unwrap().worktrees.len(), 1);
+        assert_eq!(
+            app.worktree_popup.as_ref().unwrap().list_state.selected(),
+            Some(0)
+        );
+        assert_eq!(
+            app.view.source,
+            Some((String::new(), "main changes\n".into()))
+        );
+        assert_eq!(app.branch, "main");
+        assert!(!linked_repo.root.exists());
+        git(dir.path(), &["show-ref", "--verify", "refs/heads/linked"]);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.show_operation_details);
+        assert!(app.worktree_popup.is_some());
+    }
+
+    #[test]
+    fn worktree_deletion_rechecks_dirty_files_and_locks_after_confirmation() {
+        for locked in [false, true] {
+            let (dir, _linked, repo, linked_repo) = crate::git::tests::linked_repo();
+            let mut app = App::new(repo).unwrap();
+            app.handle_key(key('w'));
+            app.handle_key(key('j'));
+            app.handle_key(key('D'));
+            assert!(app.worktree_popup.as_ref().unwrap().removal.is_some());
+            if locked {
+                git(
+                    dir.path(),
+                    &["worktree", "lock", linked_repo.root.to_str().unwrap()],
+                );
+            } else {
+                std::fs::write(
+                    linked_repo.root.join("keep.txt"),
+                    "new work after confirmation\n",
+                )
+                .unwrap();
+            }
+            app.handle_key(key('y'));
+            wait_for_operation(&mut app);
+            assert!(matches!(
+                app.operation_details.as_ref().unwrap().result,
+                Some(OperationResult::Failed(_))
+            ));
+            let details = app.operation_details.as_ref().unwrap();
+            let output = details.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+            assert!(
+                output.contains(if locked {
+                    "locked worktree"
+                } else {
+                    "modified or untracked files"
+                }),
+                "{output}"
+            );
+            assert_eq!(app.worktree_popup.as_ref().unwrap().worktrees.len(), 2);
+            assert_eq!(
+                app.worktree_popup.as_ref().unwrap().list_state.selected(),
+                Some(1)
+            );
+            assert_eq!(linked_repo.branch().unwrap(), "linked");
+            assert_eq!(app.branch, "main");
+            if locked {
+                assert!(app.worktree_popup.as_ref().unwrap().worktrees[1].locked);
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(linked_repo.root.join("keep.txt")).unwrap(),
+                    "new work after confirmation\n"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn worktree_picker_waits_for_running_git_operations() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo).unwrap();
+        let (_sender, events) = std::sync::mpsc::channel();
+        app.pending = Some(OperationHandle {
+            events,
+            cancel: std::sync::mpsc::channel().0,
+        });
+        app.handle_key(key('w'));
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("Wait for the current Git operation")
+        );
+        assert!(app.worktree_popup.is_none());
+        assert!(app.worktree_request.is_none());
     }
 
     #[test]

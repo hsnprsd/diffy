@@ -10,7 +10,7 @@ mod watch;
 use std::{
     env,
     io::{self, IsTerminal},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -36,9 +36,10 @@ fn main() -> Result<()> {
                  Updates automatically when repository files or refs change.\n\
                  Keys: ←/→/Tab focus · ↑/↓/j/k move\n\
                        Space stage/unstage file or hunk · c commit · p pull · P push\n\
-                       e edit in $EDITOR · [/] hunks · ? help · q quit\n\n\
+                       w worktrees · e edit in $EDITOR · [/] hunks · ? help · q quit\n\n\
                  Git output opens automatically: ↑/↓ or PgUp/PgDn scroll · Esc cancel running / close completed.\n\
                  Commit popup: Ctrl+S commit · Enter newline · Esc cancel.\n\
+                 Worktree picker: Enter switch · D/Del delete · r refresh · Esc close.\n\
                  Pull is fast-forward only. Staging/unstaging never changes working-tree files."
             );
             return Ok(());
@@ -81,6 +82,11 @@ fn main() -> Result<()> {
                     if app.handle_key(key) {
                         break;
                     }
+                    if let Some(path) = app.worktree_request.take()
+                        && let Err(error) = switch_worktree(&path, &mut app, &mut watcher)
+                    {
+                        app.worktree_popup.as_mut().unwrap().error = Some(format!("{error:#}"));
+                    }
                     if let Some(request) = app.edit_request.take() {
                         edit_file(request, &mut app, &mut terminal)?;
                     }
@@ -95,6 +101,22 @@ fn main() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn switch_worktree(path: &Path, app: &mut App, watcher: &mut Watcher) -> Result<()> {
+    let repo = Repository::discover(path)?;
+    anyhow::ensure!(
+        repo.root == path.canonicalize()? && repo.common_dir == app.repo.common_dir,
+        "Selected worktree is no longer part of this repository"
+    );
+    // Prepare both before replacing either: failures leave the old view and watcher usable.
+    let next_watcher = Watcher::new(&repo).context("Could not watch worktree")?;
+    let mut next_app = App::new(repo)?;
+    next_app.focus = app.focus;
+    next_app.resize_diff(app.viewport_width, app.viewport_height);
+    *watcher = next_watcher;
+    *app = next_app;
     Ok(())
 }
 
@@ -141,5 +163,173 @@ impl Drop for RestoreTerminal {
         ratatui::restore();
         // Ensure an error printed by main starts on its own line.
         let _ = io::Write::flush(&mut io::stdout());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        app::Focus,
+        git::tests::{git, linked_repo, repo, text},
+    };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::{fs, time::Instant};
+
+    fn key(app: &mut App, code: KeyCode) {
+        assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    fn refresh_on_change(app: &mut App, watcher: &mut Watcher) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !watcher.poll().unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "Selected worktree was not watched"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        app.refresh();
+    }
+
+    #[test]
+    fn switching_retargets_the_view_watcher_staging_editor_and_commits() {
+        let (_dir, _linked, repo, linked_repo) = linked_repo();
+        fs::write(repo.root.join("same.txt"), "main changes\n").unwrap();
+        fs::write(linked_repo.root.join("same.txt"), "staged\n").unwrap();
+        git(&linked_repo.root, &["add", "."]);
+        fs::write(linked_repo.root.join("same.txt"), "unstaged\n").unwrap();
+        let main_index = fs::read(repo.git_dir.join("index")).unwrap();
+        let linked_index = fs::read(linked_repo.git_dir.join("index")).unwrap();
+        let main_head = fs::read(repo.git_dir.join("refs/heads/main")).unwrap();
+        let mut watcher = Watcher::new(&repo).unwrap();
+        let mut app = App::new(repo.clone()).unwrap();
+        app.focus = Focus::Diff;
+        app.resize_diff(42, 8);
+        app.scroll = 5;
+        key(&mut app, KeyCode::Char('w'));
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        let path = app.worktree_request.take().unwrap();
+        switch_worktree(&path, &mut app, &mut watcher).unwrap();
+        assert_eq!(app.repo.root, linked_repo.root);
+        assert_eq!(app.repo.git_dir, linked_repo.git_dir);
+        assert_eq!(app.branch, "linked");
+        assert!(app.focus == Focus::Diff);
+        assert_eq!(
+            (app.viewport_width, app.viewport_height, app.scroll),
+            (42, 8, 0)
+        );
+        assert_eq!(
+            app.files
+                .iter()
+                .map(|entry| entry.staged)
+                .collect::<Vec<_>>(),
+            vec![false, true]
+        );
+        assert_eq!(
+            app.view.source,
+            Some(("staged\n".into(), "unstaged\n".into()))
+        );
+        assert!(app.worktree_popup.is_none());
+        assert_eq!(fs::read(repo.git_dir.join("index")).unwrap(), main_index);
+        assert_eq!(
+            fs::read(linked_repo.git_dir.join("index")).unwrap(),
+            linked_index
+        );
+
+        fs::write(linked_repo.root.join("same.txt"), "live changes\n").unwrap();
+        refresh_on_change(&mut app, &mut watcher);
+        assert_eq!(
+            app.view.source,
+            Some(("staged\n".into(), "live changes\n".into()))
+        );
+        key(&mut app, KeyCode::Char('e'));
+        assert_eq!(
+            app.edit_request.take().unwrap().path,
+            PathBuf::from("same.txt")
+        );
+        app.focus = Focus::Files;
+        key(&mut app, KeyCode::Char(' '));
+        let staged = linked_repo.staged_files().unwrap();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(
+            text(linked_repo.contents(&staged[0]).unwrap().1),
+            "live changes\n"
+        );
+        key(&mut app, KeyCode::Char('c'));
+        app.handle_paste("Commit in selected worktree");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.operation_label().is_some() {
+            app.poll_operation();
+            assert!(Instant::now() < deadline, "Commit did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            app.status
+                .as_ref()
+                .unwrap()
+                .message()
+                .starts_with("Committed:")
+        );
+        assert!(linked_repo.files().unwrap().is_empty());
+        assert_eq!(fs::read(repo.git_dir.join("index")).unwrap(), main_index);
+        assert_eq!(
+            fs::read(repo.git_dir.join("refs/heads/main")).unwrap(),
+            main_head
+        );
+        assert_eq!(
+            fs::read_to_string(repo.root.join("same.txt")).unwrap(),
+            "main changes\n"
+        );
+
+        key(&mut app, KeyCode::Esc); // Close the completed operation's output.
+        key(&mut app, KeyCode::Char('w'));
+        key(&mut app, KeyCode::Home);
+        key(&mut app, KeyCode::Enter);
+        let path = app.worktree_request.take().unwrap();
+        switch_worktree(&path, &mut app, &mut watcher).unwrap();
+        assert_eq!(app.repo.root, repo.root);
+        assert_eq!(app.branch, "main");
+        assert_eq!(
+            app.view.source,
+            Some((String::new(), "main changes\n".into()))
+        );
+        assert!(app.status.is_none());
+        assert!(app.operation_details.is_none());
+        fs::write(repo.root.join("same.txt"), "main live changes\n").unwrap();
+        refresh_on_change(&mut app, &mut watcher);
+        assert_eq!(
+            app.view.source,
+            Some((String::new(), "main live changes\n".into()))
+        );
+    }
+
+    #[test]
+    fn failed_switches_preserve_the_previous_snapshot_and_watcher() {
+        let (_dir, _linked, main_repo, linked_repo) = linked_repo();
+        let (_unrelated, unrelated_repo) = repo();
+        fs::write(main_repo.root.join("main.txt"), "previous snapshot\n").unwrap();
+        let mut watcher = Watcher::new(&main_repo).unwrap();
+        let mut app = App::new(main_repo.clone()).unwrap();
+        fs::write(linked_repo.git_dir.join("index"), "invalid index").unwrap();
+        for path in [&linked_repo.root, &unrelated_repo.root] {
+            assert!(switch_worktree(path, &mut app, &mut watcher).is_err());
+            assert_eq!(app.repo.root, main_repo.root);
+            assert_eq!(
+                app.view.source,
+                Some((String::new(), "previous snapshot\n".into()))
+            );
+        }
+        fs::remove_dir_all(&linked_repo.root).unwrap();
+        assert!(switch_worktree(&linked_repo.root, &mut app, &mut watcher).is_err());
+        assert_eq!(app.branch, "main");
+        fs::write(main_repo.root.join("main.txt"), "still watching\n").unwrap();
+        refresh_on_change(&mut app, &mut watcher);
+        assert_eq!(
+            app.view.source,
+            Some((String::new(), "still watching\n".into()))
+        );
     }
 }

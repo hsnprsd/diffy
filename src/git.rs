@@ -19,6 +19,14 @@ pub struct FileEntry {
     pub staged: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: PathBuf,
+    pub branch: String,
+    pub locked: bool,
+    pub prunable: bool,
+}
+
 #[derive(Debug)]
 pub enum Content {
     Text(String),
@@ -45,6 +53,7 @@ pub enum Operation {
     Commit(String),
     Pull,
     Push,
+    RemoveWorktree(PathBuf),
 }
 
 impl Operation {
@@ -53,6 +62,7 @@ impl Operation {
             Self::Commit(_) => "Committing",
             Self::Pull => "Pulling",
             Self::Push => "Pushing",
+            Self::RemoveWorktree(_) => "Removing worktree",
         }
     }
 }
@@ -98,6 +108,47 @@ impl Repository {
             git_dir,
             common_dir,
         })
+    }
+
+    pub fn worktrees(&self) -> Result<Vec<Worktree>> {
+        let output = self.output(&["worktree", "list", "--porcelain", "-z"])?;
+        ensure_success(&output).context("Could not list worktrees (requires Git 2.36+)")?;
+        Ok(parse_worktrees(&output.stdout))
+    }
+
+    pub fn removable_worktree(&self, path: &Path) -> Result<Worktree> {
+        anyhow::ensure!(
+            !self.root.starts_with(path),
+            "Cannot delete the current worktree or a directory containing it; switch to another first"
+        );
+        let worktrees = self.worktrees()?;
+        let worktree = worktrees
+            .iter()
+            .find(|worktree| worktree.path == path)
+            .cloned()
+            .context("Worktree is no longer registered in this repository; refresh the list")?;
+        anyhow::ensure!(
+            !worktrees
+                .iter()
+                .any(|worktree| worktree.path != path && worktree.path.starts_with(path)),
+            "Cannot delete a worktree containing another registered worktree; remove the nested worktree first"
+        );
+        anyhow::ensure!(
+            !worktree.locked,
+            "Cannot delete a locked worktree; unlock it with Git first"
+        );
+        if path.try_exists()? {
+            let target = Self::discover(path)?;
+            anyhow::ensure!(
+                target.root == path.canonicalize()? && target.common_dir == self.common_dir,
+                "Worktree no longer belongs to this repository"
+            );
+            anyhow::ensure!(
+                target.git_dir != target.common_dir,
+                "Cannot delete the main worktree"
+            );
+        }
+        Ok(worktree)
     }
 
     pub fn branch(&self) -> Result<String> {
@@ -296,6 +347,14 @@ impl Repository {
                 cmd.args(["commit", "--cleanup=whitespace", "-F", "-"]);
                 Some(message.clone())
             }
+            Operation::RemoveWorktree(path) => {
+                // Revalidate after confirmation; Git itself checks for dirty files and locks
+                // again when executing. Never force removal or delete the branch.
+                self.removable_worktree(path)?;
+                cmd.args(["worktree", "remove", "--"]).arg(path);
+                success_message = format!("Removed worktree {}", path.display());
+                None
+            }
             Operation::Pull | Operation::Push => {
                 let output = self.output(&["symbolic-ref", "--quiet", "HEAD"])?;
                 anyhow::ensure!(output.status.success(), "Cannot pull/push a detached HEAD");
@@ -466,6 +525,41 @@ impl Repository {
     }
 }
 
+fn parse_worktrees(bytes: &[u8]) -> Vec<Worktree> {
+    // NUL-delimited fields preserve spaces, newlines, and non-UTF-8 path bytes.
+    let fields: Vec<&[u8]> = bytes.split(|&byte| byte == 0).collect();
+    fields
+        .split(|field| field.is_empty())
+        .filter_map(|fields| {
+            let path = fields.first()?.strip_prefix(b"worktree ")?;
+            if fields.contains(&b"bare".as_slice()) {
+                return None;
+            }
+            let value = |prefix: &[u8]| fields.iter().find_map(|field| field.strip_prefix(prefix));
+            let branch = if let Some(branch) = value(b"branch ") {
+                String::from_utf8_lossy(branch.strip_prefix(b"refs/heads/").unwrap_or(branch))
+                    .into_owned()
+            } else {
+                let head = value(b"HEAD ").unwrap_or(b"unknown");
+                format!(
+                    "{} (detached)",
+                    String::from_utf8_lossy(&head[..head.len().min(7)])
+                )
+            };
+            Some(Worktree {
+                path: PathBuf::from(os_from_bytes(path)),
+                branch,
+                locked: fields
+                    .iter()
+                    .any(|field| *field == b"locked" || field.starts_with(b"locked ")),
+                prunable: fields
+                    .iter()
+                    .any(|field| *field == b"prunable" || field.starts_with(b"prunable ")),
+            })
+        })
+        .collect()
+}
+
 fn command(dir: &Path) -> Command {
     let mut command = Command::new("git");
     command
@@ -585,6 +679,19 @@ pub mod tests {
         (dir, repo)
     }
 
+    pub fn linked_repo() -> (TempDir, TempDir, Repository, Repository) {
+        let (dir, repo) = repo();
+        git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
+        let linked = tempfile::tempdir().unwrap();
+        let path = linked.path().join("linked worktree");
+        git(
+            dir.path(),
+            &["worktree", "add", "-b", "linked", path.to_str().unwrap()],
+        );
+        let linked_repo = Repository::discover(&path).unwrap();
+        (dir, linked, repo, linked_repo)
+    }
+
     pub fn text(content: Content) -> String {
         match content {
             Content::Text(text) => text,
@@ -693,6 +800,250 @@ pub mod tests {
                 Content::Notice(_)
             ));
         }
+    }
+
+    #[test]
+    fn lists_the_current_worktree_on_an_unborn_branch() {
+        let (_dir, repo) = repo();
+        assert_eq!(
+            repo.worktrees().unwrap(),
+            vec![Worktree {
+                path: repo.root.clone(),
+                branch: "main".into(),
+                locked: false,
+                prunable: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn lists_worktrees_from_any_worktree_with_detached_locked_and_prunable_states() {
+        let (dir, linked, repo, linked_repo) = linked_repo();
+        git(&linked_repo.root, &["checkout", "--detach"]);
+        git(
+            dir.path(),
+            &[
+                "worktree",
+                "lock",
+                linked_repo.root.to_str().unwrap(),
+                "--reason",
+                "keep it",
+            ],
+        );
+        let worktrees = repo.worktrees().unwrap();
+        assert_eq!(worktrees, linked_repo.worktrees().unwrap());
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0].path, repo.root);
+        assert_eq!(worktrees[0].branch, "main");
+        assert_eq!(worktrees[1].path, linked_repo.root);
+        assert!(worktrees[1].branch.ends_with(" (detached)"));
+        assert!(worktrees[1].locked);
+        git(
+            dir.path(),
+            &["worktree", "unlock", linked_repo.root.to_str().unwrap()],
+        );
+        fs::remove_dir_all(linked.path()).unwrap();
+        let worktrees = repo.worktrees().unwrap();
+        assert_eq!(worktrees[1].path, linked_repo.root);
+        assert!(worktrees[1].prunable);
+    }
+
+    #[test]
+    fn parses_nul_delimited_paths_and_skips_bare_repositories() {
+        let worktrees = parse_worktrees(b"worktree /bare\0bare\0\0worktree /a path\nwith\ttabs\0HEAD abcdef012345\0branch refs/heads/topic/nested\0locked a reason\nnext line\0\0worktree /detached\0HEAD 0123456789\0detached\0prunable missing metadata\0\0");
+        assert_eq!(
+            worktrees,
+            vec![
+                Worktree {
+                    path: PathBuf::from("/a path\nwith\ttabs"),
+                    branch: "topic/nested".into(),
+                    locked: true,
+                    prunable: false
+                },
+                Worktree {
+                    path: PathBuf::from("/detached"),
+                    branch: "0123456 (detached)".into(),
+                    locked: false,
+                    prunable: true
+                },
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_paths_preserve_newlines_and_non_utf8_bytes() {
+        let (dir, repo) = repo();
+        git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
+        let linked = tempfile::tempdir().unwrap();
+        let path = linked.path().join(os_from_bytes(b"linked\n\t\xff"));
+        let output = command(dir.path())
+            .args(["worktree", "add", "-b", "linked"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        ensure_success(&output).unwrap();
+        let worktrees = repo.worktrees().unwrap();
+        assert_eq!(worktrees[1].path, path);
+        assert_eq!(worktrees[1].branch, "linked");
+        assert_eq!(
+            Repository::discover(&path).unwrap().worktrees().unwrap(),
+            worktrees
+        );
+        repo.run_operation(&Operation::RemoveWorktree(path.clone()))
+            .unwrap();
+        assert_eq!(repo.worktrees().unwrap().len(), 1);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn removes_a_clean_worktree_and_ignored_files_but_keeps_its_branch() {
+        let (_dir, _linked, repo, linked_repo) = linked_repo();
+        fs::write(linked_repo.root.join(".gitignore"), "ignored\n").unwrap();
+        git(&linked_repo.root, &["add", "."]);
+        git(
+            &linked_repo.root,
+            &["commit", "-qm", "Ignore generated files"],
+        );
+        fs::write(linked_repo.root.join("ignored"), "generated content\n").unwrap();
+        let head = repo
+            .output(&["rev-parse", "refs/heads/linked"])
+            .unwrap()
+            .stdout;
+        repo.run_operation(&Operation::RemoveWorktree(linked_repo.root.clone()))
+            .unwrap();
+        assert_eq!(
+            repo.worktrees()
+                .unwrap()
+                .iter()
+                .map(|wt| &wt.path)
+                .collect::<Vec<_>>(),
+            vec![&repo.root]
+        );
+        assert!(!linked_repo.root.exists());
+        assert!(!linked_repo.git_dir.exists());
+        assert_eq!(
+            repo.output(&["rev-parse", "refs/heads/linked"])
+                .unwrap()
+                .stdout,
+            head
+        );
+        assert_eq!(repo.branch().unwrap(), "main");
+    }
+
+    #[test]
+    fn worktree_removal_refuses_untracked_staged_and_unstaged_changes() {
+        for state in ["untracked", "staged", "unstaged"] {
+            let (_dir, _linked, repo, linked_repo) = linked_repo();
+            let path = linked_repo.root.join("keep.txt");
+            if state == "unstaged" {
+                fs::write(&path, "original\n").unwrap();
+                git(&linked_repo.root, &["add", "."]);
+                git(&linked_repo.root, &["commit", "-qm", "Track file"]);
+            }
+            fs::write(&path, "precious changes\n").unwrap();
+            if state == "staged" {
+                git(&linked_repo.root, &["add", "."]);
+            }
+            let error = repo
+                .run_operation(&Operation::RemoveWorktree(linked_repo.root.clone()))
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("modified or untracked files"),
+                "{state}: {error:#}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), "precious changes\n");
+            assert_eq!(repo.worktrees().unwrap().len(), 2);
+            assert_eq!(linked_repo.files().unwrap()[0].staged, state == "staged");
+        }
+    }
+
+    #[test]
+    fn worktree_removal_refuses_current_main_locked_and_unregistered_paths() {
+        let (dir, linked, repo, linked_repo) = linked_repo();
+        let unregistered = linked.path().to_path_buf();
+        for (source, target, expected) in [
+            (&repo, &repo.root, "current worktree"),
+            (&linked_repo, &linked_repo.root, "current worktree"),
+            (&linked_repo, &repo.root, "main worktree"),
+            (&repo, &unregistered, "no longer registered"),
+        ] {
+            let error = source
+                .run_operation(&Operation::RemoveWorktree(target.clone()))
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+        git(
+            dir.path(),
+            &["worktree", "lock", linked_repo.root.to_str().unwrap()],
+        );
+        let error = repo
+            .run_operation(&Operation::RemoveWorktree(linked_repo.root.clone()))
+            .unwrap_err();
+        assert!(error.to_string().contains("locked worktree"));
+        assert_eq!(repo.worktrees().unwrap().len(), 2);
+        assert!(linked_repo.root.is_dir());
+        assert_eq!(linked_repo.branch().unwrap(), "linked");
+    }
+
+    #[test]
+    fn worktree_removal_preserves_nested_worktrees_even_when_they_are_ignored() {
+        let (dir, _linked, repo, linked_repo) = linked_repo();
+        fs::write(linked_repo.root.join(".gitignore"), "nested/\n").unwrap();
+        git(&linked_repo.root, &["add", "."]);
+        git(
+            &linked_repo.root,
+            &["commit", "-qm", "Ignore nested directory"],
+        );
+        let nested = linked_repo.root.join("nested");
+        git(
+            dir.path(),
+            &["worktree", "add", "-b", "nested", nested.to_str().unwrap()],
+        );
+        fs::write(nested.join("keep.txt"), "nested work\n").unwrap();
+        let error = repo
+            .run_operation(&Operation::RemoveWorktree(linked_repo.root.clone()))
+            .unwrap_err();
+        assert!(error.to_string().contains("another registered worktree"));
+        let nested_repo = Repository::discover(&nested).unwrap();
+        let error = nested_repo
+            .run_operation(&Operation::RemoveWorktree(linked_repo.root.clone()))
+            .unwrap_err();
+        assert!(error.to_string().contains("current worktree"));
+        assert_eq!(repo.worktrees().unwrap().len(), 3);
+        assert_eq!(
+            fs::read_to_string(nested.join("keep.txt")).unwrap(),
+            "nested work\n"
+        );
+        assert_eq!(nested_repo.branch().unwrap(), "nested");
+    }
+
+    #[test]
+    fn removes_only_the_selected_missing_worktree_registration() {
+        let (dir, linked, repo, linked_repo) = linked_repo();
+        let another = linked.path().join("another missing worktree");
+        git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "another",
+                another.to_str().unwrap(),
+            ],
+        );
+        fs::remove_dir_all(&linked_repo.root).unwrap();
+        fs::remove_dir_all(&another).unwrap();
+        repo.run_operation(&Operation::RemoveWorktree(linked_repo.root.clone()))
+            .unwrap();
+        let worktrees = repo.worktrees().unwrap();
+        assert_eq!(
+            worktrees.iter().map(|wt| &wt.path).collect::<Vec<_>>(),
+            vec![&repo.root, &another]
+        );
+        assert!(worktrees[1].prunable);
+        assert!(!linked_repo.git_dir.exists());
+        git(dir.path(), &["rev-parse", "--verify", "refs/heads/linked"]);
     }
 
     #[test]

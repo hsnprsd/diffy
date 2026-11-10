@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState,
+        ScrollbarState, Wrap,
     },
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -94,7 +94,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         )
     } else {
         Line::styled(
-            " Space stage/unstage · c commit · p pull · P push · e edit · ? help · q quit",
+            " w worktrees · Space stage/unstage · c commit · p pull · P push · e edit · ? help · q quit",
             Style::default().fg(MUTED),
         )
     };
@@ -102,6 +102,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(footer).style(Style::default().bg(PANEL)),
         chunks[2],
     );
+    if app.worktree_popup.is_some() {
+        worktree_popup(frame, area, app);
+    }
     if let Some(popup) = &app.commit_popup {
         commit_popup(frame, area, popup, app.operation_label().is_some());
     }
@@ -426,6 +429,100 @@ fn operation_details(frame: &mut Frame, area: Rect, details: &mut OperationDetai
     );
 }
 
+fn worktree_popup(frame: &mut Frame, area: Rect, app: &mut App) {
+    let popup = app.worktree_popup.as_mut().unwrap();
+    let width = area.width.saturating_sub(4).min(100);
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(if popup.removal.is_some() {
+            12
+        } else {
+            popup
+                .worktrees
+                .len()
+                .saturating_mul(2)
+                .saturating_add(3)
+                .min(25) as u16
+        });
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let block = if popup.removal.is_some() {
+        pane(" Delete worktree ".into(), true)
+            .border_style(Style::default().fg(RED))
+            .title_bottom(" y delete · n / Esc cancel ")
+    } else {
+        pane(format!(" Worktrees {} ", popup.worktrees.len()), true)
+            .title_bottom(" ↑/↓ select · Enter switch · D/Del delete · r refresh · Esc close ")
+    };
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    if let Some(worktree) = &popup.removal {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    "Permanently delete this worktree?",
+                    Style::default().fg(RED).bold(),
+                ),
+                Line::raw(""),
+                Line::raw(format!("Branch: {}", safe_text(&worktree.branch))),
+                Line::raw(safe_text(&worktree.path.to_string_lossy())),
+                Line::raw(""),
+                Line::raw("The directory, including ignored files, will be deleted."),
+                Line::raw("The branch is kept. Dirty and locked worktrees are refused."),
+                Line::raw("Unreferenced detached commits may be garbage-collected."),
+            ])
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+    popup.viewport_height = (chunks[0].height as usize / 2).max(1);
+    let items: Vec<ListItem> = popup
+        .worktrees
+        .iter()
+        .map(|worktree| {
+            let current = if worktree.path == app.repo.root {
+                "* "
+            } else {
+                "  "
+            };
+            let locked = if worktree.locked { " [locked]" } else { "" };
+            let prunable = if worktree.prunable { " [prunable]" } else { "" };
+            ListItem::new(vec![
+                Line::from(format!(
+                    "{current}{}{locked}{prunable}",
+                    safe_text(&worktree.branch)
+                )),
+                Line::styled(
+                    format!("  {}", safe_text(&worktree.path.to_string_lossy())),
+                    Style::default().fg(MUTED),
+                ),
+            ])
+        })
+        .collect();
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("▸ ")
+            .highlight_style(Style::default().bg(HUNK_BG).add_modifier(Modifier::BOLD)),
+        chunks[0],
+        &mut popup.list_state,
+    );
+    frame.render_widget(
+        Paragraph::new(popup.error.as_deref().map(safe_text).unwrap_or_else(|| {
+            "* current worktree · Switching does not modify files or the index".into()
+        }))
+        .style(Style::default().fg(if popup.error.is_some() { RED } else { MUTED })),
+        chunks[1],
+    );
+}
+
 fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool) {
     let width = area.width.saturating_sub(4).min(80);
     let height = area.height.saturating_sub(2).min(18);
@@ -510,6 +607,7 @@ fn help(frame: &mut Frame, area: Rect) {
         Line::raw("c                   Commit changes (message popup)"),
         Line::raw("p / P               Pull (fast-forward only) / push branch"),
         Line::raw("e                   Edit in $EDITOR at first (visible) hunk"),
+        Line::raw("w                   Choose a worktree (D/Del deletes it)"),
         Line::raw("PgUp/PgDn or u/d    Page up / down"),
         Line::raw("Home/End or g/G     First / last row or file"),
         Line::raw("[ / ]               Previous / next hunk"),
@@ -836,6 +934,113 @@ mod tests {
             .finish(OperationResult::Success);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(screen(&terminal).contains("Pushed to origin (refs/heads/main)"));
+    }
+
+    #[test]
+    fn worktree_picker_shows_paths_states_controls_and_escaped_errors() {
+        let (_dir, _linked, repo, linked_repo) = crate::git::tests::linked_repo();
+        let mut app = App::new(repo).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("w worktrees"));
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        let popup = app.worktree_popup.as_mut().unwrap();
+        popup.worktrees[1].locked = true;
+        popup.worktrees[1].prunable = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        for expected in [
+            "Worktrees 2",
+            "* main",
+            "linked [locked] [prunable]",
+            "Enter switch",
+            "r refresh",
+            "D/Del delete",
+            "Esc close",
+            linked_repo.root.to_str().unwrap(),
+        ] {
+            assert!(text.contains(expected), "Missing: {expected}");
+        }
+        let popup = app.worktree_popup.as_mut().unwrap();
+        popup.worktrees[1].path = "/tmp/worktree\n\u{1b}".into();
+        popup.error = Some("Missing\nworktree\u{1b}".into());
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("/tmp/worktree\\n\\u{1b}"));
+        assert!(text.contains("Missing\\nworktree\\u{1b}"));
+    }
+
+    #[test]
+    fn worktree_deletion_confirmation_shows_the_target_and_safety_warning() {
+        let (_dir, _linked, repo, linked_repo) = crate::git::tests::linked_repo();
+        let mut app = App::new(repo).unwrap();
+        for ch in ['w', 'j', 'D'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        for expected in [
+            "Delete worktree",
+            "Permanently delete this worktree?",
+            "Branch: linked",
+            "including ignored files",
+            "The branch is kept",
+            "Dirty and locked",
+            "Unreferenced detached commits",
+            "y delete",
+            "n / Esc cancel",
+            linked_repo.root.to_str().unwrap(),
+        ] {
+            assert!(text.contains(expected), "Missing: {expected}");
+        }
+        app.worktree_popup
+            .as_mut()
+            .unwrap()
+            .removal
+            .as_mut()
+            .unwrap()
+            .path = "/tmp/worktree\n\u{1b}".into();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("/tmp/worktree\\n\\u{1b}"));
+        for (width, height) in [(80, 24), (40, 12), (10, 4), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("Worktrees 2"));
+    }
+
+    #[test]
+    fn worktree_picker_scrolls_to_the_selection_and_handles_tiny_terminals() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        let popup = app.worktree_popup.as_mut().unwrap();
+        let template = popup.worktrees[0].clone();
+        for n in 0..30 {
+            let mut worktree = template.clone();
+            worktree.branch = format!("branch-{n}");
+            worktree.path = format!("/worktree/{n}").into();
+            popup.worktrees.push(worktree);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        for (width, height) in [(120, 30), (80, 24), (40, 12), (10, 4), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            if height > 4 {
+                let text = screen(&terminal);
+                assert!(text.contains("branch-29"));
+                assert!(text.contains("/worktree/29"));
+                assert!(app.worktree_popup.as_ref().unwrap().list_state.offset() > 0);
+            }
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("* main"));
     }
 
     #[test]

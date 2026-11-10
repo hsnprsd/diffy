@@ -15,6 +15,9 @@ Ratatui, Tree-sitter, and native filesystem notifications.
   highlights.
 - **Unified changes view:** inspect staged and unstaged changes together.
   Supports detached HEADs, linked worktrees, and unborn branches.
+- **Worktree picker:** press `w` to choose another worktree in the same repository.
+  Review its staged and unstaged changes with live updates, without restarting.
+  Delete obsolete worktrees with `D` / `Delete` and explicit confirmation.
 - **Open in your editor:** press `e` in either pane to open the working-tree file
   in `$EDITOR`, then return to diffy when the editor exits. Opens at the first
   visible hunk in the Diff pane, or the file's first hunk in the Files pane.
@@ -27,7 +30,8 @@ Ratatui, Tree-sitter, and native filesystem notifications.
   and a scrollable details popup. Completed commands show past-tense
   results, including the destination remote and branch for pushes.
 - **Explicit writes:** browsing never modifies the index or working tree. Staging,
-  unstaging, committing, pulling, pushing, and editing require explicit shortcuts;
+  unstaging, committing, pulling, pushing, editing, and deleting worktrees require
+  explicit shortcuts;
   staging/unstaging never changes working-tree files. External diff/textconv tools are
   disabled. Terminal controls in source and paths are escaped, and symlinks are
   previewed without following their targets.
@@ -35,7 +39,7 @@ Ratatui, Tree-sitter, and native filesystem notifications.
 ## Install
 
 Requires a current stable Rust toolchain, a C compiler (to build the bundled
-Tree-sitter grammars), Git 2.31+, and an interactive UTF-8 terminal.
+Tree-sitter grammars), Git 2.36+, and an interactive UTF-8 terminal.
 
 ```sh
 # From this checkout; installs into ~/.cargo/bin by default
@@ -80,9 +84,10 @@ against the index's “ours” stage.
 | `Enter` | Focus the diff |
 | `j` / `k`, `↓` / `↑` | Select files in the Files pane; scroll in the Diff pane |
 | `Space` | Stage an unstaged entry / unstage a staged entry: whole file in Files, first visible hunk in Diff |
+| `w` | Choose a worktree to review |
 | `c` | Open the commit-message popup (staged changes, or all changes if nothing is staged) |
 | `p` / `P` | Pull (fast-forward only) / push the current branch |
-| `Esc` | Cancel a running commit, pull, or push; close its output after completion |
+| `Esc` | Cancel a running Git operation; close its output after completion |
 | `e` | Open in `$EDITOR` at the first visible hunk (Diff pane) or first file hunk (Files pane) |
 | `PageUp` / `PageDown`, `u` / `d` | Page up / down |
 | `Home` / `End`, `g` / `G` | First / last row or file |
@@ -96,6 +101,55 @@ markers appear only on the first screen row of each source line. Scrolling and
 paging move through screen rows, including wrapped continuations.
 
 Below 80 columns, only the focused pane is shown; `←` / `→` or `Tab` switches panes.
+
+### Review another worktree
+
+Press **`w`** to open the worktree picker. It lists this repository's main and
+linked worktrees with their branch (or detached HEAD), full path, and any locked
+or prunable status. **`*`** marks the current worktree. Use **`↑`/`↓`** or **`j`/`k`**
+to select one, then **`Enter`** to switch; **`Esc`**, **`q`**, or **`w`** cancels.
+PageUp/PageDown (or `u`/`d`) and Home/End (or `g`/`G`) navigate longer lists.
+The list is refreshed each time it opens; press **`r`** to reload it while open.
+Worktree discovery uses Git 2.36+'s NUL-delimited output to preserve unusual paths.
+
+Switching shows the selected worktree's staged and unstaged changes, not a
+comparison between worktrees or their commits. The live watcher, staging,
+commits, pull/push, and editor actions all follow the selected worktree.
+Switching itself never checks out a branch or modifies files or the index.
+Selecting the current worktree leaves the view unchanged. A successful switch
+starts at the first changed file and clears the previous worktree's command
+status/output. Switching waits until any running Git operation has finished;
+close its output or a commit-message popup before opening the picker.
+
+Locked worktrees can still be reviewed. Missing/prunable worktrees remain listed;
+if a worktree cannot be opened or watched, the picker shows an error and the
+previous worktree and its watcher remain active. You can select another entry
+or refresh the list. Bare repositories are not selectable.
+
+### Delete an obsolete worktree
+
+In the worktree picker, select a worktree and press **`D`** or **`Delete`**. The
+confirmation shows its branch and full path. Press **`y`** to delete it, or **`n`**
+/ **`Esc`** to cancel; Enter does not confirm. Deletion removes the worktree's
+directory **including ignored files**, and its Git registration, but **keeps its
+branch**. Commits reachable only through a detached HEAD can eventually be
+garbage-collected after removal. A missing/prunable worktree can also be removed;
+only the selected registration is cleaned up, not every stale worktree.
+
+Deletion runs `git worktree remove -- PATH` in the background, with the same
+output and cancellation controls as other Git operations. It never uses force:
+staged, unstaged, or untracked changes prevent deletion. Locked worktrees, the
+main worktree, and the worktree currently being viewed cannot be deleted.
+Worktrees containing other registered worktrees are also protected; remove the
+nested worktrees first. Switch to another worktree first to delete a linked
+worktree you are viewing. Unlock
+locked worktrees explicitly with Git if needed. Git also refuses worktrees with
+submodules. Locks and registration are rechecked after confirmation, and Git
+checks for dirty files when removal actually runs.
+
+The picker reloads after completion, including on failure or cancellation. Close
+the output popup with **`Esc`** to return to it. Cancellation does not undo files
+already removed; inspect the worktree before retrying.
 
 ### Stage, unstage, and commit
 
@@ -141,8 +195,8 @@ commit, the staged changes remain available for retry.
   pushing to the upstream remote, its target branch is used; otherwise the
   current branch name is used. A first push sets the upstream if none exists.
 
-Detached HEADs cannot be pulled/pushed. Commit, pull, and push run in the
-background. Their output popup opens automatically, showing stdout/stderr as it
+Detached HEADs cannot be pulled/pushed. Commit, pull, push, and worktree deletion
+run in the background. Their output popup opens automatically, showing stdout/stderr as it
 arrives. Pull/push explicitly enable Git's progress output. After completion the
 result changes to **Committed**, **Pulled**, or **Pushed to REMOTE (BRANCH)**,
 rather than leaving a running-operation label behind.
@@ -234,7 +288,9 @@ cargo test --all-targets
 
 Tests use isolated temporary Git repositories and cover unified staged/unstaged
 entries, staging-aware selection on refresh, conflicts, binary/large files,
-unusual paths, submodules, linked worktrees, all
+unusual paths, submodules, linked worktree discovery and switching (including
+watcher and write-operation targeting, picker navigation, and failed switches),
+confirmed worktree removal and dirty/locked/current/main worktree protections, all
 bundled highlighting queries, diff hunks, keyboard navigation, editor commands
 and visible-hunk line mapping, small terminal layouts, filesystem/index/ref
 notifications, and CLI errors. Staging/commit tests cover whole files, individual

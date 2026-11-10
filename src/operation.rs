@@ -243,6 +243,7 @@ fn stream(mut pipe: impl Read, sender: &SyncSender<OperationEvent>) -> std::io::
 pub struct OperationDetails {
     pub label: &'static str,
     pub commit: bool,
+    pub worktree_removal: bool,
     pub success_message: String,
     pub result: Option<OperationResult>,
     pub cancelling: bool,
@@ -262,6 +263,7 @@ impl OperationDetails {
         Self {
             label: operation.label(),
             commit: matches!(operation, Operation::Commit(_)),
+            worktree_removal: matches!(operation, Operation::RemoveWorktree(_)),
             success_message: String::new(),
             result: None,
             cancelling: false,
