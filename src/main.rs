@@ -36,7 +36,8 @@ fn main() -> Result<()> {
                  Updates automatically when repository files or refs change.\n\
                  Keys: ←/→/Tab focus · ↑/↓/j/k move\n\
                        Space stage/unstage file or hunk · c commit · p pull · P push\n\
-                       w worktrees · e edit in $EDITOR · [/] hunks · ? help · q quit\n\n\
+                       w worktrees · e edit in $EDITOR · [/] hunks · ? help · q quit\n\
+                       v toggle unified / side-by-side diff\n\n\
                  Git output opens automatically: ↑/↓ or PgUp/PgDn scroll · Esc cancel running / close completed.\n\
                  Commit popup: Ctrl+S commit · Enter newline · Esc cancel.\n\
                  Worktree picker: Enter switch · D/Del delete · r refresh · Esc close.\n\
@@ -114,6 +115,7 @@ fn switch_worktree(path: &Path, app: &mut App, watcher: &mut Watcher) -> Result<
     let next_watcher = Watcher::new(&repo).context("Could not watch worktree")?;
     let mut next_app = App::new(repo)?;
     next_app.focus = app.focus;
+    next_app.set_diff_mode(app.diff_mode);
     next_app.resize_diff(app.viewport_width, app.viewport_height);
     *watcher = next_watcher;
     *app = next_app;
@@ -304,6 +306,26 @@ mod tests {
             app.view.source,
             Some((String::new(), "main live changes\n".into()))
         );
+    }
+
+    #[test]
+    fn switching_worktrees_preserves_the_diff_mode_at_the_same_viewport_width() {
+        use crate::diff::DiffMode;
+
+        let (_dir, _linked, repo, linked_repo) = linked_repo();
+        let mut watcher = Watcher::new(&repo).unwrap();
+        let mut app = App::new(repo.clone()).unwrap();
+        for (mode, path) in [
+            (DiffMode::SideBySide, &linked_repo.root),
+            (DiffMode::Unified, &repo.root),
+        ] {
+            app.set_diff_mode(mode);
+            switch_worktree(path, &mut app, &mut watcher).unwrap();
+            assert_eq!(app.diff_mode, mode);
+            assert_eq!(app.viewport_width, 80);
+            assert_eq!(app.view.split_rows.is_empty(), mode == DiffMode::Unified);
+            assert_eq!(app.scroll, 0);
+        }
     }
 
     #[test]

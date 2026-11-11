@@ -12,7 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, CommitPopup, Focus, Status},
-    diff::{DiffRow, RowKind, WrappedRow},
+    diff::{DiffMode, DiffRow, DiffView, RowKind, SplitRow, WrappedRow, split_widths},
     git::safe_text,
     highlight::TEXT,
     operation::{OperationDetails, OperationResult},
@@ -94,7 +94,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         )
     } else {
         Line::styled(
-            " w worktrees · Space stage/unstage · c commit · p pull · P push · e edit · ? help · q quit",
+            " v view · w worktrees · Space stage/unstage · c commit · p pull · P push · e edit · ? help · q quit",
             Style::default().fg(MUTED),
         )
     };
@@ -182,9 +182,23 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
             )
         })
         .unwrap_or_else(|| "Changes".into());
-    let block = pane(format!(" {title} "), app.focus == Focus::Diff);
+    let block = pane(String::new(), app.focus == Focus::Diff);
     let inner = block.inner(area);
-    app.resize_diff(inner.width as usize, inner.height as usize);
+    let mode = app.diff_mode.effective(inner.width as usize);
+    let mode_label = if mode != app.diff_mode {
+        "Unified (narrow)"
+    } else {
+        mode.name()
+    };
+    let block = block.title(format!(" {mode_label} · {title} "));
+    let header_height = u16::from(mode == DiffMode::SideBySide).min(inner.height);
+    let content = Rect::new(
+        inner.x,
+        inner.y + header_height,
+        inner.width,
+        inner.height.saturating_sub(header_height),
+    );
+    app.resize_diff(content.width as usize, content.height as usize);
     let language = app.view.language.map_or("Text", |language| language.name());
     let mut summary = Line::from(vec![
         Span::raw(format!(
@@ -215,26 +229,48 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
         Style::default().fg(MUTED),
     ));
     frame.render_widget(block.title_bottom(summary), area);
+    if mode == DiffMode::SideBySide {
+        let (old_width, new_width) = split_widths(inner.width as usize);
+        let (before, after) = if app.selected().is_some_and(|entry| entry.staged) {
+            (" Before · HEAD", " After · Index")
+        } else {
+            (" Before · Index", " After · Working tree")
+        };
+        frame.render_widget(
+            Paragraph::new(format!("{before:<old_width$}│{after:<new_width$}"))
+                .style(Style::default().fg(MUTED).bg(PANEL)),
+            Rect::new(inner.x, inner.y, inner.width, header_height),
+        );
+    }
     let rows: Vec<Line> = app
         .view
         .wrapped_rows
         .iter()
+        .enumerate()
         .skip(app.scroll)
-        .take(inner.height as usize)
-        .map(|wrapped| {
-            render_row(
-                &app.view.rows[wrapped.row],
-                wrapped,
-                app.view.number_width.max(1),
-                inner.width as usize,
-            )
+        .take(content.height as usize)
+        .map(|(index, wrapped)| {
+            if mode == DiffMode::SideBySide {
+                render_split_row(
+                    &app.view,
+                    &app.view.split_rows[index],
+                    content.width as usize,
+                )
+            } else {
+                render_row(
+                    &app.view.rows[wrapped.row],
+                    wrapped,
+                    app.view.number_width.max(1),
+                    content.width as usize,
+                )
+            }
         })
         .collect();
-    frame.render_widget(Paragraph::new(rows), inner);
-    if app.view.wrapped_rows.len() > inner.height as usize && area.width > 1 {
+    frame.render_widget(Paragraph::new(rows), content);
+    if app.view.wrapped_rows.len() > content.height as usize && area.width > 1 {
         let mut state = ScrollbarState::new(app.view.wrapped_rows.len())
             .position(app.scroll)
-            .viewport_content_length(inner.height as usize);
+            .viewport_content_length(content.height as usize);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
@@ -247,19 +283,22 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+fn row_theme(kind: RowKind) -> (char, Color, Color) {
+    match kind {
+        RowKind::Added => ('+', GREEN, ADD_BG),
+        RowKind::Removed => ('-', RED, DEL_BG),
+        RowKind::Hunk => (' ', ACCENT, HUNK_BG),
+        RowKind::Note | RowKind::Context => (' ', MUTED, BG),
+    }
+}
+
 fn render_row(
     row: &DiffRow,
     wrapped: &WrappedRow,
     number_width: usize,
     width: usize,
 ) -> Line<'static> {
-    let (marker, fg, bg) = match row.kind {
-        RowKind::Added => ('+', GREEN, ADD_BG),
-        RowKind::Removed => ('-', RED, DEL_BG),
-        RowKind::Hunk => (' ', ACCENT, HUNK_BG),
-        RowKind::Note => (' ', MUTED, BG),
-        RowKind::Context => (' ', MUTED, BG),
-    };
+    let (marker, fg, bg) = row_theme(row.kind);
     let available = width
         .saturating_sub(row.gutter_width(number_width))
         .min(wrapped.width);
@@ -283,6 +322,63 @@ fn render_row(
     let mut spans = vec![Span::styled(gutter, Style::default().fg(fg))];
     spans.extend(clip_spans(&row.spans, wrapped.offset, available));
     Line::from(spans).style(Style::default().fg(TEXT).bg(bg))
+}
+
+fn render_split_row(view: &DiffView, row: &SplitRow, width: usize) -> Line<'static> {
+    let (old, new) = match row {
+        SplitRow::Shared(wrapped) => {
+            return render_row(&view.rows[wrapped.row], wrapped, view.number_width, width);
+        }
+        SplitRow::Pair { old, new } => (old, new),
+    };
+    let (old_width, new_width) = split_widths(width);
+    let mut spans = render_side(view, *old, true, old_width);
+    spans.push(Span::styled("│", Style::default().fg(BORDER).bg(BG)));
+    spans.extend(render_side(view, *new, false, new_width));
+    Line::from(spans)
+}
+
+fn render_side(
+    view: &DiffView,
+    wrapped: Option<WrappedRow>,
+    old: bool,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let Some(wrapped) = wrapped else {
+        return vec![Span::styled(" ".repeat(width), Style::default().bg(PANEL))];
+    };
+    let row = &view.rows[wrapped.row];
+    let (marker, foreground, background) = row_theme(row.kind);
+    let base = Style::default()
+        .fg(if row.kind == RowKind::Note {
+            MUTED
+        } else {
+            TEXT
+        })
+        .bg(background);
+    let number_width = view.number_width.max(1);
+    let gutter = if row.kind == RowKind::Note {
+        " ".into()
+    } else {
+        let number = if old { row.old_line } else { row.new_line };
+        let number = number
+            .filter(|_| wrapped.offset == 0)
+            .map_or_else(String::new, |number| number.to_string());
+        let marker = if wrapped.offset > 0 { ' ' } else { marker };
+        format!(" {number:>number_width$} {marker} ")
+    };
+    let available = width
+        .saturating_sub(row.split_gutter_width(number_width))
+        .min(wrapped.width);
+    let mut spans = vec![Span::styled(gutter, base.fg(foreground))];
+    spans.extend(
+        clip_spans(&row.spans, wrapped.offset, available)
+            .into_iter()
+            .map(|span| Span::styled(span.content, base.patch(span.style))),
+    );
+    let used: usize = spans.iter().map(Span::width).sum();
+    spans.push(Span::styled(" ".repeat(width.saturating_sub(used)), base));
+    spans
 }
 
 /// Crop in terminal cells, keeping line-number gutters fixed and wide characters intact.
@@ -602,6 +698,7 @@ fn help(frame: &mut Frame, area: Rect) {
         Line::raw(""),
         Line::raw("←/→ or Tab          Switch files / diff focus"),
         Line::raw("j/k or ↑/↓          Select files / scroll diff"),
+        Line::raw("v                   Toggle unified / side-by-side diff"),
         Line::raw("Enter               Focus the diff"),
         Line::raw("Space               Stage/unstage file (Files) or hunk (Diff)"),
         Line::raw("c                   Commit changes (message popup)"),
@@ -771,6 +868,155 @@ mod tests {
             }
         }
         assert_eq!(view.patches, patches);
+    }
+
+    #[test]
+    fn split_rendering_preserves_word_backgrounds_gutters_and_column_alignment() {
+        use crate::{
+            git::Content,
+            highlight::{ADD_WORD_BG, DEL_WORD_BG, SyntaxHighlighter},
+        };
+
+        let mut view = DiffView::build(
+            std::path::Path::new("test.rs"),
+            Content::Text("let label = \"start obsolete_value end\";\n".into()),
+            Content::Text("let label = \"start replacement_value end\";\n".into()),
+            &mut SyntaxHighlighter::default(),
+        )
+        .unwrap();
+        for width in [60, 61, 80] {
+            view.layout(width, DiffMode::SideBySide);
+            let lines: Vec<_> = view
+                .split_rows
+                .iter()
+                .map(|row| {
+                    let line = render_split_row(&view, row, width);
+                    if matches!(row, SplitRow::Pair { .. }) {
+                        assert_eq!(line.width(), width);
+                    }
+                    line
+                })
+                .collect();
+            let mut terminal =
+                Terminal::new(TestBackend::new(width as u16, lines.len() as u16)).unwrap();
+            terminal
+                .draw(|frame| frame.render_widget(Paragraph::new(lines), frame.area()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            for (background, word) in [
+                (DEL_WORD_BG, "obsolete_value"),
+                (ADD_WORD_BG, "replacement_value"),
+            ] {
+                let highlighted: String = buffer
+                    .content
+                    .iter()
+                    .filter(|cell| cell.bg == background)
+                    .map(|cell| {
+                        assert_eq!(cell.fg, GREEN);
+                        cell.symbol()
+                    })
+                    .collect();
+                assert_eq!(highlighted, word);
+            }
+            let (old_width, _) = split_widths(width);
+            for (y, row) in view.split_rows.iter().enumerate() {
+                let SplitRow::Pair { old, new } = row else {
+                    continue;
+                };
+                assert_eq!(buffer[(old_width as u16, y as u16)].symbol(), "│");
+                for (start, wrapped, background, marker) in
+                    [(0, old, DEL_BG, '-'), (old_width + 1, new, ADD_BG, '+')]
+                {
+                    assert_eq!(
+                        buffer[(start as u16, y as u16)].bg,
+                        if wrapped.is_some() { background } else { PANEL }
+                    );
+                    if let Some(wrapped) = wrapped {
+                        let gutter: String = (start..start + 5)
+                            .map(|x| buffer[(x as u16, y as u16)].symbol())
+                            .collect();
+                        assert_eq!(
+                            gutter,
+                            if wrapped.offset == 0 {
+                                format!(" 1 {marker} ")
+                            } else {
+                                "     ".into()
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn split_view_labels_revisions_and_returns_after_narrow_fallback() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("test.txt"), "context\nold text\ntail\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        std::fs::write(dir.path().join("test.txt"), "context\nnew text\ntail\n").unwrap();
+        let mut app = App::new(repo).unwrap();
+        app.focus = Focus::Diff;
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Side-by-side"));
+        assert!(text.contains("Before · Index"));
+        assert!(text.contains("After · Working tree"));
+        let buffer = terminal.backend().buffer();
+        assert!((0..30).any(|y| {
+            let line: String = (0..140).map(|x| buffer[(x, y)].symbol()).collect();
+            line.contains("old text") && line.contains("new text")
+        }));
+        let mut narrow = Terminal::new(TestBackend::new(59, 15)).unwrap();
+        narrow.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&narrow).contains("Unified (narrow)"));
+        assert!(app.view.split_rows.is_empty());
+        assert_eq!(app.diff_mode, DiffMode::SideBySide);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("Side-by-side"));
+        assert!(!app.view.split_rows.is_empty());
+        app.focus = Focus::Files;
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(app.selected().unwrap().staged);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Before · HEAD"));
+        assert!(text.contains("After · Index"));
+    }
+
+    #[test]
+    fn split_rendering_keeps_wide_characters_combining_marks_and_control_escapes() {
+        use crate::{git::Content, highlight::SyntaxHighlighter};
+
+        let source = format!("{}\x1b\n", "界e\u{301}".repeat(20));
+        let mut view = DiffView::build(
+            std::path::Path::new("test.txt"),
+            Content::Text(String::new()),
+            Content::Text(source),
+            &mut SyntaxHighlighter::default(),
+        )
+        .unwrap();
+        view.layout(60, DiffMode::SideBySide);
+        let mut text = String::new();
+        for row in &view.split_rows {
+            if let SplitRow::Pair { new: Some(new), .. } = row {
+                let spans = render_side(&view, Some(*new), false, split_widths(60).1);
+                text.extend(
+                    spans
+                        .iter()
+                        .skip(1)
+                        .take(spans.len() - 2)
+                        .map(|span| span.content.as_ref()),
+                );
+                assert_eq!(
+                    spans.iter().map(Span::width).sum::<usize>(),
+                    split_widths(60).1
+                );
+            }
+        }
+        assert_eq!(text, format!("{}\\u{{1b}}", "界e\u{301}".repeat(20)));
     }
 
     #[test]
@@ -1107,19 +1353,30 @@ mod tests {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
         let mut app = App::new(repo).unwrap();
-        for (width, height) in [(120, 30), (80, 24), (40, 12), (10, 4), (1, 1)] {
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            for focus in [Focus::Files, Focus::Diff] {
-                let code = match focus {
-                    Focus::Files => KeyCode::Left,
-                    Focus::Diff => KeyCode::Right,
-                };
-                app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
-                assert!(app.focus == focus);
-                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-                app.show_help = true;
-                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-                app.show_help = false;
+        for mode in [DiffMode::Unified, DiffMode::SideBySide] {
+            app.set_diff_mode(mode);
+            for (width, height) in [
+                (120, 30),
+                (80, 24),
+                (40, 12),
+                (10, 4),
+                (1, 1),
+                (0, 0),
+                (120, 3),
+            ] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                for focus in [Focus::Files, Focus::Diff] {
+                    let code = match focus {
+                        Focus::Files => KeyCode::Left,
+                        Focus::Diff => KeyCode::Right,
+                    };
+                    app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+                    assert!(app.focus == focus);
+                    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                    app.show_help = true;
+                    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                    app.show_help = false;
+                }
             }
         }
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();

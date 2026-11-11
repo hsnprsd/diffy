@@ -26,6 +26,7 @@ fn help_describes_automatic_updates_and_pane_navigation() {
     assert!(help.contains("←/→/Tab focus"));
     assert!(help.contains("↑/↓/j/k move"));
     assert!(help.contains("e edit in $EDITOR"));
+    assert!(help.contains("v toggle unified / side-by-side diff"));
     assert!(help.contains("w worktrees"));
     assert!(help.contains("Worktree picker: Enter switch · D/Del delete · r refresh · Esc close"));
     assert!(help.contains("Space stage/unstage file or hunk"));

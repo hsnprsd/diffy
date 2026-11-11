@@ -15,6 +15,43 @@ use crate::{
 };
 
 const MAX_LINES: usize = 40_000;
+const MIN_SPLIT_WIDTH: usize = 60;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffMode {
+    #[default]
+    Unified,
+    SideBySide,
+}
+
+impl DiffMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Unified => Self::SideBySide,
+            Self::SideBySide => Self::Unified,
+        }
+    }
+
+    pub fn effective(self, width: usize) -> Self {
+        if width < MIN_SPLIT_WIDTH {
+            Self::Unified
+        } else {
+            self
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Unified => "Unified",
+            Self::SideBySide => "Side-by-side",
+        }
+    }
+}
+
+pub fn split_widths(width: usize) -> (usize, usize) {
+    let available = width.saturating_sub(1); // Center divider.
+    (available / 2, available - available / 2)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowKind {
@@ -39,12 +76,22 @@ pub struct WrappedRow {
     pub width: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitRow {
+    Shared(WrappedRow),
+    Pair {
+        old: Option<WrappedRow>,
+        new: Option<WrappedRow>,
+    },
+}
+
 #[derive(Default)]
 pub struct DiffView {
     pub rows: Vec<DiffRow>,
     pub hunks: Vec<usize>,
     pub wrapped_rows: Vec<WrappedRow>,
     pub wrapped_hunks: Vec<usize>,
+    pub split_rows: Vec<SplitRow>,
     pub patches: Vec<String>,
     pub source: Option<(String, String)>,
     pub additions: usize,
@@ -54,34 +101,127 @@ pub struct DiffView {
 }
 
 impl DiffView {
+    pub fn layout(&mut self, width: usize, mode: DiffMode) {
+        match mode.effective(width) {
+            DiffMode::Unified => self.wrap(width),
+            DiffMode::SideBySide => self.wrap_split(width),
+        }
+    }
+
     /// Lay out terminal-cell ranges without splitting wide characters or their combining marks.
     pub fn wrap(&mut self, width: usize) {
         self.wrapped_rows.clear();
         self.wrapped_hunks.clear();
+        self.split_rows.clear();
         for (row, source) in self.rows.iter().enumerate() {
             if source.kind == RowKind::Hunk {
                 self.wrapped_hunks.push(self.wrapped_rows.len());
             }
             let available = width.saturating_sub(source.gutter_width(self.number_width));
-            let mut wrapped = WrappedRow {
-                row,
-                offset: 0,
-                width: 0,
-            };
-            if available > 0 {
-                for ch in source.spans.iter().flat_map(|span| span.content.chars()) {
-                    let cells = ch.width().unwrap_or(0);
-                    if cells > 0 && wrapped.width > 0 && wrapped.width + cells > available {
-                        self.wrapped_rows.push(wrapped);
-                        wrapped.offset += wrapped.width;
-                        wrapped.width = 0;
+            self.wrapped_rows
+                .extend(wrap_source(row, source, available));
+        }
+    }
+
+    fn wrap_split(&mut self, width: usize) {
+        self.wrapped_rows.clear();
+        self.wrapped_hunks.clear();
+        self.split_rows.clear();
+        let widths = split_widths(width);
+        let mut row = 0;
+        while row < self.rows.len() {
+            match self.rows[row].kind {
+                RowKind::Context => {
+                    self.push_pair(Some(row), Some(row), widths);
+                    row += 1;
+                }
+                RowKind::Added | RowKind::Removed => {
+                    let mut old = Vec::new();
+                    let mut new = Vec::new();
+                    while row < self.rows.len()
+                        && matches!(self.rows[row].kind, RowKind::Added | RowKind::Removed)
+                    {
+                        let side = if self.rows[row].kind == RowKind::Removed {
+                            &mut old
+                        } else {
+                            &mut new
+                        };
+                        let source = row;
+                        row += 1;
+                        let note = (row < self.rows.len() && self.rows[row].kind == RowKind::Note)
+                            .then_some(row);
+                        if note.is_some() {
+                            row += 1;
+                        }
+                        side.push((source, note));
                     }
-                    wrapped.width += cells;
+                    // Pair replacements in source order; surplus lines get an empty opposite side.
+                    for index in 0..old.len().max(new.len()) {
+                        self.push_pair(
+                            old.get(index).map(|&(source, _)| source),
+                            new.get(index).map(|&(source, _)| source),
+                            widths,
+                        );
+                        let old_note = old.get(index).and_then(|&(_, note)| note);
+                        let new_note = new.get(index).and_then(|&(_, note)| note);
+                        if old_note.is_some() || new_note.is_some() {
+                            self.push_pair(old_note, new_note, widths);
+                        }
+                    }
+                }
+                RowKind::Hunk | RowKind::Note => {
+                    if self.rows[row].kind == RowKind::Hunk {
+                        self.wrapped_hunks.push(self.wrapped_rows.len());
+                    }
+                    for wrapped in wrap_source(row, &self.rows[row], width.saturating_sub(1)) {
+                        self.wrapped_rows.push(wrapped);
+                        self.split_rows.push(SplitRow::Shared(wrapped));
+                    }
+                    row += 1;
                 }
             }
-            // Empty source lines still occupy one screen row.
-            self.wrapped_rows.push(wrapped);
         }
+    }
+
+    fn push_pair(&mut self, old: Option<usize>, new: Option<usize>, widths: (usize, usize)) {
+        let wrap = |row: Option<usize>, width: usize| {
+            row.map(|row| {
+                let source = &self.rows[row];
+                let available = width.saturating_sub(source.split_gutter_width(self.number_width));
+                wrap_source(row, source, available)
+            })
+            .unwrap_or_default()
+        };
+        let old = wrap(old, widths.0);
+        let new = wrap(new, widths.1);
+        // Wrap each side independently, keeping the next pair below the longer side.
+        for index in 0..old.len().max(new.len()) {
+            let old = old.get(index).copied();
+            let new = new.get(index).copied();
+            self.wrapped_rows.push(old.or(new).unwrap());
+            self.split_rows.push(SplitRow::Pair { old, new });
+        }
+    }
+
+    /// Locate the same source position after resizing or switching layouts.
+    pub fn position(&self, anchor: WrappedRow) -> usize {
+        let matches = |row: &WrappedRow| row.row == anchor.row && row.offset <= anchor.offset;
+        let position = if self.split_rows.is_empty() {
+            self.wrapped_rows.iter().rposition(matches)
+        } else {
+            self.split_rows.iter().rposition(|row| match row {
+                SplitRow::Shared(row) => matches(row),
+                SplitRow::Pair { old, new } => {
+                    old.as_ref().is_some_and(matches) || new.as_ref().is_some_and(matches)
+                }
+            })
+        };
+        position.unwrap_or_else(|| {
+            self.wrapped_rows
+                .iter()
+                .position(|row| row.row >= anchor.row)
+                .unwrap_or_else(|| self.wrapped_rows.len().saturating_sub(1))
+        })
     }
 
     pub fn notice(message: impl Into<String>) -> Self {
@@ -195,6 +335,29 @@ impl DiffView {
     }
 }
 
+fn wrap_source(row: usize, source: &DiffRow, available: usize) -> Vec<WrappedRow> {
+    let mut rows = Vec::new();
+    let mut wrapped = WrappedRow {
+        row,
+        offset: 0,
+        width: 0,
+    };
+    if available > 0 {
+        for ch in source.spans.iter().flat_map(|span| span.content.chars()) {
+            let cells = ch.width().unwrap_or(0);
+            if cells > 0 && wrapped.width > 0 && wrapped.width + cells > available {
+                rows.push(wrapped);
+                wrapped.offset += wrapped.width;
+                wrapped.width = 0;
+            }
+            wrapped.width += cells;
+        }
+    }
+    // Empty source lines still occupy one screen row.
+    rows.push(wrapped);
+    rows
+}
+
 /// Find raw byte ranges before display escaping or tab expansion changes their offsets.
 fn word_emphasis<'a>(
     diff: &'a TextDiff<'a, 'a, 'a, str>,
@@ -250,6 +413,14 @@ impl DiffRow {
         }
     }
 
+    pub fn split_gutter_width(&self, number_width: usize) -> usize {
+        if matches!(self.kind, RowKind::Hunk | RowKind::Note) {
+            1
+        } else {
+            number_width.max(1) + 4
+        }
+    }
+
     fn note(message: impl Into<String>) -> Self {
         Self {
             kind: RowKind::Note,
@@ -284,6 +455,137 @@ mod tests {
             .filter(|span| matches!(span.style.bg, Some(ADD_WORD_BG | DEL_WORD_BG)))
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    fn split_text(view: &DiffView, row: Option<WrappedRow>) -> Option<String> {
+        row.map(|row| row_text(&view.rows[row.row]))
+    }
+
+    #[test]
+    fn split_layout_pairs_context_replacements_and_surplus_lines() {
+        let mut view = build(
+            "context\nold one\nold two\ntail\n",
+            "context\nnew one\nnew two\nnew three\ntail\n",
+        );
+        let patches = view.patches.clone();
+        let new_second = view
+            .rows
+            .iter()
+            .position(|row| row.kind == RowKind::Added && row.new_line == Some(3))
+            .unwrap();
+        view.layout(80, DiffMode::SideBySide);
+        assert_eq!(view.wrapped_hunks, [0]);
+        assert_eq!(view.wrapped_rows.len(), 6);
+        assert!(matches!(view.split_rows[0], SplitRow::Shared(_)));
+        let pairs: Vec<_> = view
+            .split_rows
+            .iter()
+            .filter_map(|row| match *row {
+                SplitRow::Pair { old, new } => {
+                    Some((split_text(&view, old), split_text(&view, new)))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                (Some("context".into()), Some("context".into())),
+                (Some("old one".into()), Some("new one".into())),
+                (Some("old two".into()), Some("new two".into())),
+                (None, Some("new three".into())),
+                (Some("tail".into()), Some("tail".into())),
+            ]
+        );
+        // The right side must map to its own pair, not the next representative source row.
+        assert_eq!(
+            view.position(WrappedRow {
+                row: new_second,
+                offset: 0,
+                width: 7,
+            }),
+            3
+        );
+        assert_eq!(view.patches, patches);
+    }
+
+    #[test]
+    fn split_layout_handles_one_sided_changes_and_empty_lines() {
+        for (old, new, old_present, new_present) in
+            [("", "\n", false, true), ("removed\n", "", true, false)]
+        {
+            let mut view = build(old, new);
+            view.layout(80, DiffMode::SideBySide);
+            assert_eq!(view.split_rows.len(), 2);
+            let SplitRow::Pair { old, new } = view.split_rows[1] else {
+                panic!("Expected a one-sided line");
+            };
+            assert_eq!(old.is_some(), old_present);
+            assert_eq!(new.is_some(), new_present);
+            assert_eq!(old.or(new).unwrap().offset, 0);
+        }
+    }
+
+    #[test]
+    fn split_layout_keeps_missing_newline_notes_with_their_source_line() {
+        let mut view = build("old first\nold last", "new first");
+        view.layout(80, DiffMode::SideBySide);
+        let pairs: Vec<_> = view
+            .split_rows
+            .iter()
+            .filter_map(|row| match *row {
+                SplitRow::Pair { old, new } => {
+                    Some((split_text(&view, old), split_text(&view, new)))
+                }
+                _ => None,
+            })
+            .collect();
+        let note = "\\ No newline at end of file";
+        assert_eq!(
+            pairs,
+            [
+                (Some("old first".into()), Some("new first".into())),
+                (None, Some(note.into())),
+                (Some("old last".into()), None),
+                (Some(note.into()), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_layout_wraps_sides_independently_without_splitting_unicode() {
+        let mut view = build(&format!("{}\n", "界e\u{301}".repeat(20)), "short\n");
+        let patches = view.patches.clone();
+        view.layout(60, DiffMode::SideBySide);
+        assert_eq!(view.split_rows.len(), 4);
+        for (index, expected_width) in [24, 24, 12].into_iter().enumerate() {
+            let SplitRow::Pair { old, new } = view.split_rows[index + 1] else {
+                panic!("Expected wrapped code");
+            };
+            let old = old.unwrap();
+            assert_eq!((old.offset, old.width), (index * 24, expected_width));
+            assert_eq!(new.map(|row| row.width), (index == 0).then_some(5));
+            assert_eq!(view.position(old), index + 1);
+        }
+        let anchor = view.wrapped_rows[2];
+        view.layout(60, DiffMode::Unified);
+        let visible = view.wrapped_rows[view.position(anchor)];
+        assert_eq!(visible.row, anchor.row);
+        assert!(visible.offset <= anchor.offset && visible.offset + visible.width > anchor.offset);
+        assert_eq!(view.patches, patches);
+    }
+
+    #[test]
+    fn split_layout_shows_notices_and_falls_back_when_narrow() {
+        let mut view = DiffView::notice("Binary file");
+        view.layout(80, DiffMode::SideBySide);
+        assert_eq!(view.split_rows, [SplitRow::Shared(view.wrapped_rows[0])]);
+        view.layout(59, DiffMode::SideBySide);
+        assert!(view.split_rows.is_empty());
+        assert_eq!(view.wrapped_rows.len(), 1);
+        assert_eq!(row_text(&view.rows[0]), "Binary file");
+        assert_eq!(DiffMode::SideBySide.effective(59), DiffMode::Unified);
+        assert_eq!(DiffMode::SideBySide.effective(60), DiffMode::SideBySide);
     }
 
     #[test]

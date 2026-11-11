@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
 use crate::{
-    diff::DiffView,
+    diff::{DiffMode, DiffView},
     editor::EditRequest,
     git::{Content, FileEntry, Operation, Repository, Worktree},
     highlight::SyntaxHighlighter,
@@ -141,6 +141,7 @@ pub struct App {
     pub files: Vec<FileEntry>,
     pub list_state: ListState,
     pub view: DiffView,
+    pub diff_mode: DiffMode,
     pub focus: Focus,
     pub scroll: usize,
     pub viewport_height: usize,
@@ -168,6 +169,7 @@ impl App {
             show_operation_details: false,
             list_state: ListState::default(),
             view: DiffView::default(),
+            diff_mode: DiffMode::default(),
             focus: Focus::Files,
             scroll: 0,
             viewport_height: 20,
@@ -227,7 +229,7 @@ impl App {
         let Some(entry) = self.selected().cloned() else {
             self.view = DiffView::notice("No changes — working tree/index is clean");
             self.scroll = 0;
-            self.view.wrap(self.viewport_width);
+            self.view.layout(self.viewport_width, self.diff_mode);
             return;
         };
         match self
@@ -241,25 +243,33 @@ impl App {
                 self.error = Some(format!("{}: {error:#}", entry.path.display()));
             }
         }
-        self.view.wrap(self.viewport_width);
+        self.view.layout(self.viewport_width, self.diff_mode);
         self.clamp_scroll();
     }
 
     pub fn resize_diff(&mut self, width: usize, height: usize) {
         self.viewport_height = height;
         if self.viewport_width != width {
-            let anchor = self.view.wrapped_rows.get(self.scroll).copied();
-            self.viewport_width = width;
-            self.view.wrap(width);
-            if let Some(anchor) = anchor {
-                self.scroll = self
-                    .view
-                    .wrapped_rows
-                    .partition_point(|row| (row.row, row.offset) <= (anchor.row, anchor.offset))
-                    .saturating_sub(1);
-            }
+            self.relayout_diff(width);
         }
         self.clamp_scroll();
+    }
+
+    pub fn set_diff_mode(&mut self, mode: DiffMode) {
+        if self.diff_mode != mode {
+            self.diff_mode = mode;
+            self.relayout_diff(self.viewport_width);
+            self.clamp_scroll();
+        }
+    }
+
+    fn relayout_diff(&mut self, width: usize) {
+        let anchor = self.view.wrapped_rows.get(self.scroll).copied();
+        self.viewport_width = width;
+        self.view.layout(width, self.diff_mode);
+        if let Some(anchor) = anchor {
+            self.scroll = self.view.position(anchor);
+        }
     }
 
     pub fn clamp_scroll(&mut self) {
@@ -762,6 +772,7 @@ impl App {
                 }
             }
             KeyCode::Char('e') => self.request_edit(),
+            KeyCode::Char('v') => self.set_diff_mode(self.diff_mode.toggle()),
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = if self.focus == Focus::Files {
@@ -926,7 +937,86 @@ mod tests {
     }
 
     #[test]
+    fn view_toggle_preserves_file_focus_source_patches_and_repository_contents() {
+        let (dir, mut app) = app_with_hunks();
+        let path = dir.path().join("a file.txt");
+        let contents = std::fs::read(&path).unwrap();
+        let index = std::fs::read(app.repo.git_dir.join("index")).unwrap();
+        let source = app.view.source.clone();
+        let patches = app.view.patches.clone();
+        let selected = app.selected().unwrap().path.clone();
+        assert_eq!(app.diff_mode, DiffMode::Unified);
+        app.handle_key(key('v'));
+        assert_eq!(app.diff_mode, DiffMode::SideBySide);
+        assert!(!app.view.split_rows.is_empty());
+        assert!(app.focus == Focus::Files);
+        assert_eq!(app.selected().unwrap().path, selected);
+        assert_eq!(app.view.source, source);
+        assert_eq!(app.view.patches, patches);
+        app.handle_key(key('j'));
+        assert!(app.selected().unwrap().staged);
+        assert!(!app.view.split_rows.is_empty());
+        app.refresh();
+        assert_eq!(app.diff_mode, DiffMode::SideBySide);
+        assert!(!app.view.split_rows.is_empty());
+        app.handle_key(key('v'));
+        assert_eq!(app.diff_mode, DiffMode::Unified);
+        assert!(app.view.split_rows.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), contents);
+        assert_eq!(
+            std::fs::read(app.repo.git_dir.join("index")).unwrap(),
+            index
+        );
+    }
+
+    #[test]
+    fn toggling_and_narrow_fallback_preserve_the_active_hunk_and_mode_preference() {
+        let (_dir, mut app) = app_with_hunks();
+        app.resize_diff(80, 4);
+        app.handle_key(key(']'));
+        assert_eq!(app.active_hunk(), 1);
+        for _ in 0..2 {
+            app.handle_key(key('v'));
+            assert_eq!(app.active_hunk(), 1);
+            assert_eq!(app.view.wrapped_rows[app.scroll].row, app.view.hunks[1]);
+        }
+        app.handle_key(key('v'));
+        app.resize_diff(59, 4);
+        assert_eq!(app.diff_mode, DiffMode::SideBySide);
+        assert!(app.view.split_rows.is_empty());
+        assert_eq!(app.active_hunk(), 1);
+        app.resize_diff(100, 4);
+        assert!(!app.view.split_rows.is_empty());
+        assert_eq!(app.active_hunk(), 1);
+    }
+
+    #[test]
+    fn view_toggle_respects_modal_popups() {
+        let (_dir, mut app) = app_with_hunks();
+        app.show_help = true;
+        app.handle_key(key('v'));
+        assert!(!app.show_help);
+        assert_eq!(app.diff_mode, DiffMode::Unified);
+        app.handle_key(key('c'));
+        app.handle_key(key('v'));
+        assert_eq!(app.commit_popup.as_ref().unwrap().message, "v");
+        assert_eq!(app.diff_mode, DiffMode::Unified);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(key('w'));
+        assert!(app.worktree_popup.is_some());
+        app.handle_key(key('v'));
+        assert!(app.worktree_popup.is_some());
+        assert_eq!(app.diff_mode, DiffMode::Unified);
+    }
+
+    #[test]
     fn wrapped_hunks_keep_navigation_editing_and_staging_on_the_source_hunk() {
+        for mode in [DiffMode::Unified, DiffMode::SideBySide] {
+            assert_wrapped_hunk_actions(mode);
+        }
+    }
+
+    fn assert_wrapped_hunk_actions(mode: DiffMode) {
         let (dir, mut app) = app_with_hunks();
         let path = dir.path().join("a file.txt");
         let content = std::fs::read_to_string(&path)
@@ -936,7 +1026,8 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         app.refresh();
         app.focus = Focus::Diff;
-        app.resize_diff(24, 4);
+        app.set_diff_mode(mode);
+        app.resize_diff(if mode == DiffMode::Unified { 24 } else { 60 }, 4);
         let second = app.view.wrapped_hunks[1];
         assert!(second > app.view.hunks[1]);
         app.handle_key(key(']'));
@@ -1233,13 +1324,20 @@ mod tests {
 
     #[test]
     fn space_in_diff_only_toggles_the_active_hunk_even_in_a_tall_viewport() {
+        for mode in [DiffMode::Unified, DiffMode::SideBySide] {
+            assert_hunk_staging(mode);
+        }
+    }
+
+    fn assert_hunk_staging(mode: DiffMode) {
         let (dir, mut app) = app_with_hunks();
+        app.set_diff_mode(mode);
         git(dir.path(), &["commit", "-qm", "Initial"]);
         app.refresh();
         app.viewport_height = 1000;
         app.handle_key(key(']'));
         assert_eq!(app.active_hunk(), 1);
-        assert_eq!(app.scroll, app.view.hunks[1]);
+        assert_eq!(app.scroll, app.view.wrapped_hunks[1]);
         app.handle_key(key('j')); // The header is offscreen, but the middle hunk is still active.
         assert_eq!(app.active_hunk(), 1);
         app.handle_key(key(' '));

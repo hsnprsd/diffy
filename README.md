@@ -3,12 +3,15 @@
 A live Git diff viewer and staging interface for the terminal, built with Rust,
 Ratatui, Tree-sitter, and native filesystem notifications.
 
-- **Syntax-aware unified diffs:** both revisions are parsed in full by Tree-sitter,
+- **Syntax-aware diffs:** both revisions are parsed in full by Tree-sitter,
   preserving multiline comments and strings. Added/removed lines have distinct
   backgrounds, with old/new line numbers and three lines of context.
 - **Word-level highlighting:** changed words and punctuation within replacement
   blocks get brighter red/green backgrounds while retaining syntax colors.
   Unicode word boundaries, wrapped lines, and expanded tabs are supported.
+- **Two diff layouts:** press `v` to toggle unified (inline) and side-by-side views.
+  Side-by-side shows the old revision on the left and the new revision on the right,
+  with aligned changes, independent line wrapping, and synchronized scrolling.
 - **Live updates:** edits, creates, deletes, renames, staging, commits, and branch
   changes trigger a debounced refresh. Selection and scroll position are preserved
   where possible. Git object writes and file-access events are ignored.
@@ -85,6 +88,7 @@ against the index's “ours” stage.
 | `←` / `→` | Focus files / diff |
 | `Tab` / `Shift+Tab` | Switch focus between files and diff |
 | `Enter` | Focus the diff |
+| `v` | Toggle unified (inline) / side-by-side diff |
 | `j` / `k`, `↓` / `↑` | Select files in the Files pane; scroll in the Diff pane |
 | `Space` | Stage an unstaged entry / unstage a staged entry: whole file in Files, first visible hunk in Diff |
 | `w` | Choose a worktree to review |
@@ -104,6 +108,29 @@ markers appear only on the first screen row of each source line. Scrolling and
 paging move through screen rows, including wrapped continuations.
 
 Below 80 columns, only the focused pane is shown; `←` / `→` or `Tab` switches panes.
+
+### Toggle diff layouts
+
+The default is **unified (inline)**: removed and added lines appear consecutively.
+Press **`v`** from either pane to switch to **side-by-side**, then press it again
+to return. The diff title shows the current layout.
+
+In side-by-side mode, **Before** is on the left and **After** on the right:
+HEAD → index for staged entries, or index → working tree for unstaged entries.
+Context appears on both sides. Removed and added lines are paired in source order;
+surplus lines have a blank opposite side. Long lines wrap independently, and each
+pair occupies enough screen rows for its longer side. Syntax colors, word-level
+highlights, line numbers, and missing-newline notices are preserved.
+
+Both modes use the same scrolling, paging, hunk navigation, staging/unstaging, and
+editor shortcuts. Toggling and resizing keep the visible source position where
+possible. The chosen layout stays active across file selections, live refreshes,
+and worktree switches for the session; restarting defaults to unified view.
+Switching layouts never changes files or the index.
+
+If the **diff pane** is narrower than 60 columns (after accounting for the sidebar
+and borders), side-by-side temporarily falls back to **Unified (narrow)**. Widening
+the pane automatically restores side-by-side without changing your preference.
 
 ### Review another worktree
 
@@ -302,8 +329,9 @@ unusual paths, submodules, linked worktree discovery and switching (including
 watcher and write-operation targeting, picker navigation, and failed switches),
 confirmed worktree removal and dirty/locked/current/main worktree protections, all
 bundled highlighting queries, word-level changes (including Unicode, punctuation,
-syntax-color preservation, wrapped rendering, and unchanged staging patches), diff
-hunks, keyboard navigation, editor commands
+syntax-color preservation, wrapped rendering, and unchanged staging patches),
+side-by-side alignment and wrapping, layout toggling and narrow-pane fallback,
+hunk navigation/staging/editor actions in both layouts, keyboard navigation, editor commands
 and visible-hunk line mapping, small terminal layouts, filesystem/index/ref
 notifications, and CLI errors. Staging/commit tests cover whole files, individual
 hunks, stale previews, unusual paths, CRLF/missing newlines, Unicode message
