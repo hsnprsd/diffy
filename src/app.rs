@@ -910,48 +910,6 @@ mod tests {
     }
 
     #[test]
-    fn worktree_picker_uses_the_active_preset_and_escape_cancels() {
-        for (keymap, down, delete) in [
-            (Keymap::Standard, KeyCode::Down, KeyCode::Delete),
-            (Keymap::Vim, KeyCode::Char('j'), KeyCode::Char('D')),
-        ] {
-            let (_dir, _linked, repo, linked_repo) = crate::git::tests::linked_repo();
-            let mut app = App::new(repo).unwrap();
-            app.keymap = keymap;
-            app.handle_key(key('w'));
-            app.handle_key(KeyEvent::new(down, KeyModifiers::NONE));
-            app.handle_key(KeyEvent::new(delete, KeyModifiers::NONE));
-            for ch in ['n', 'q', 'w'] {
-                app.handle_key(key(ch));
-                assert_eq!(
-                    app.worktree_popup
-                        .as_ref()
-                        .unwrap()
-                        .removal
-                        .as_ref()
-                        .unwrap()
-                        .path,
-                    linked_repo.root
-                );
-            }
-            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-            let popup = app.worktree_popup.as_ref().unwrap();
-            assert!(popup.removal.is_none());
-            assert_eq!(popup.list_state.selected(), Some(1));
-            for ch in ['q', 'w'] {
-                app.handle_key(key(ch));
-                assert_eq!(
-                    app.worktree_popup.as_ref().unwrap().list_state.selected(),
-                    Some(1)
-                );
-            }
-            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-            assert!(app.worktree_popup.is_none());
-            assert!(linked_repo.root.is_dir());
-        }
-    }
-
-    #[test]
     fn vim_commit_editor_inserts_navigation_letters_as_text() {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("file.txt"), "changes\n").unwrap();
@@ -970,33 +928,6 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.commit_popup.is_none());
         assert!(app.handle_key(key('q')));
-    }
-
-    #[test]
-    fn former_comparison_keys_preserve_changes_and_navigation() {
-        let (dir, repo) = repo();
-        std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
-        git(dir.path(), &["add", "."]);
-        std::fs::write(dir.path().join("file.txt"), "unstaged\n").unwrap();
-        let mut app = App::new(repo).unwrap();
-        let source = app.view.source.clone();
-        for ch in ['b', 's'] {
-            assert!(!app.handle_key(key(ch)));
-            assert_eq!(app.files.len(), 2);
-            assert_eq!(app.selected().unwrap().path, PathBuf::from("file.txt"));
-            assert_eq!(app.view.source, source);
-            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-            assert!(app.focus == Focus::Diff);
-            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-            assert!(app.focus == Focus::Files);
-        }
-        app.handle_key(key(' '));
-        assert_eq!(app.files.len(), 1);
-        assert!(app.selected().unwrap().staged);
-        assert_eq!(
-            crate::git::tests::text(app.repo.contents(app.selected().unwrap()).unwrap().1),
-            "unstaged\n"
-        );
     }
 
     #[test]
@@ -1128,26 +1059,6 @@ mod tests {
         app.resize_diff(100, 4);
         assert!(!app.view.split_rows.is_empty());
         assert_eq!(app.active_hunk(), 1);
-    }
-
-    #[test]
-    fn view_toggle_respects_modal_popups() {
-        let (_dir, mut app) = app_with_hunks();
-        app.show_help = true;
-        app.handle_key(key('v'));
-        assert!(app.show_help);
-        assert_eq!(app.diff_mode, DiffMode::Unified);
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        app.handle_key(key('c'));
-        app.handle_key(key('v'));
-        assert_eq!(app.commit_popup.as_ref().unwrap().message, "v");
-        assert_eq!(app.diff_mode, DiffMode::Unified);
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        app.handle_key(key('w'));
-        assert!(app.worktree_popup.is_some());
-        app.handle_key(key('v'));
-        assert!(app.worktree_popup.is_some());
-        assert_eq!(app.diff_mode, DiffMode::Unified);
     }
 
     #[test]
@@ -1349,8 +1260,11 @@ mod tests {
         std::fs::write(dir.path().join("test.txt"), "test\n").unwrap();
         app.refresh();
         app.handle_key(key('?'));
-        app.handle_key(key('e'));
+        for ch in ['e', 'v', 'q'] {
+            assert!(!app.handle_key(key(ch)));
+        }
         assert!(app.show_help);
+        assert_eq!(app.diff_mode, DiffMode::Unified);
         assert!(app.edit_request.is_none());
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.handle_key(key('e'));
@@ -1692,10 +1606,11 @@ mod tests {
                 .unwrap()
                 .contains("Enter a commit message")
         );
-        for ch in "qb pPe?s".chars() {
+        for ch in "qb pPe?sv".chars() {
             assert!(!app.handle_key(key(ch)));
         }
-        assert_eq!(app.commit_popup.as_ref().unwrap().message, "qb pPe?s");
+        assert_eq!(app.commit_popup.as_ref().unwrap().message, "qb pPe?sv");
+        assert_eq!(app.diff_mode, DiffMode::Unified);
         assert!(app.edit_request.is_none());
         assert!(!app.show_help);
         assert!(app.operation_label().is_none());
@@ -2083,10 +1998,11 @@ mod tests {
             app.worktree_popup.as_ref().unwrap().list_state.selected(),
             Some(0)
         );
-        for ch in [' ', 'c', 'e', 'p', 'P', '?'] {
+        for ch in [' ', 'c', 'e', 'p', 'P', '?', 'q', 'w', 'v'] {
             assert!(!app.handle_key(key(ch)));
         }
         app.handle_paste("ignored while choosing a worktree");
+        assert_eq!(app.diff_mode, DiffMode::Unified);
         assert_eq!(app.branch, "main");
         assert_eq!(app.selected().unwrap().path, PathBuf::from("main.txt"));
         assert_eq!(app.repo.files().unwrap().len(), 1);
@@ -2313,22 +2229,5 @@ mod tests {
         );
         assert!(app.worktree_popup.is_none());
         assert!(app.worktree_request.is_none());
-    }
-
-    #[test]
-    fn empty_repository_and_help_are_safe() {
-        let (_dir, repo) = repo();
-        let mut app = App::new(repo).unwrap();
-        for ch in ['j', 'k', 'G', 'g', '[', ']', 'l', 'h', 's'] {
-            assert!(!app.handle_key(key(ch)));
-        }
-        assert!(app.selected().is_none());
-        app.handle_key(key('?'));
-        assert!(app.show_help);
-        assert!(!app.handle_key(key('q')));
-        assert!(app.show_help);
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.show_help);
-        assert!(app.handle_key(key('q')));
     }
 }

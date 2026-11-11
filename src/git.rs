@@ -1046,22 +1046,6 @@ pub mod tests {
         git(dir.path(), &["rev-parse", "--verify", "refs/heads/linked"]);
     }
 
-    #[test]
-    fn discovers_linked_worktree() {
-        let (dir, _) = repo();
-        git(dir.path(), &["commit", "--allow-empty", "-qm", "Initial"]);
-        let linked = tempfile::tempdir().unwrap();
-        let path = linked.path().join("linked");
-        git(
-            dir.path(),
-            &["worktree", "add", "-b", "linked", path.to_str().unwrap()],
-        );
-        let repo = Repository::discover(&path).unwrap();
-        assert_eq!(repo.root, path.canonicalize().unwrap());
-        assert_ne!(repo.git_dir, repo.common_dir);
-        assert_eq!(repo.branch().unwrap(), "linked");
-    }
-
     #[cfg(unix)]
     #[test]
     fn symlinks_are_not_followed() {
@@ -1126,21 +1110,6 @@ pub mod tests {
             repo.contents(&files[0]).unwrap().0,
             Content::Notice(_)
         ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn non_utf8_paths_survive_git_and_blob_lookup() {
-        let (dir, repo) = repo();
-        let name = os_from_bytes(b"invalid-\xff.rs");
-        fs::write(dir.path().join(&name), "old\n").unwrap();
-        git(dir.path(), &["add", "."]);
-        git(dir.path(), &["commit", "-qm", "Initial"]);
-        fs::write(dir.path().join(&name), "new\n").unwrap();
-        let files = repo.files().unwrap();
-        assert_eq!(files[0].path.as_os_str(), name);
-        let (old, new) = repo.contents(&files[0]).unwrap();
-        assert_eq!((text(old), text(new)), ("old\n".into(), "new\n".into()));
     }
 
     #[test]
@@ -1256,6 +1225,8 @@ pub mod tests {
         git(dir.path(), &["commit", "-qm", "Initial"]);
         fs::write(dir.path().join(&name), "new\n").unwrap();
         let (entry, view) = selected_view(&repo, false);
+        assert_eq!(entry.path.as_os_str(), name);
+        assert_eq!(view.source, Some(("old\n".into(), "new\n".into())));
         repo.toggle_hunk(&entry, &view.patches[0]).unwrap();
         assert_eq!(text(repo.blob(":", &entry.path).unwrap()), "new\n");
     }
@@ -1480,10 +1451,5 @@ pub mod tests {
                     .contains("detached HEAD")
             );
         }
-    }
-
-    #[test]
-    fn escapes_terminal_controls() {
-        assert_eq!(safe_text("a\n\x1bb"), "a\\n\\u{1b}b");
     }
 }

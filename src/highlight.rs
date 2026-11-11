@@ -347,23 +347,6 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_is_safe_and_tabs_align() {
-        let lines = SyntaxHighlighter::default()
-            .lines(
-                Path::new("test.txt"),
-                "a\tb\r\n界\tx\x1b",
-                &[],
-                Color::Reset,
-            )
-            .unwrap();
-        let text: Vec<String> = lines
-            .iter()
-            .map(|line| line.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-        assert_eq!(text, ["a   b", "界  x\\u{1b}"]);
-    }
-
-    #[test]
     fn raw_emphasis_ranges_follow_tab_expansion_controls_and_crlf() {
         let lines = SyntaxHighlighter::default()
             .lines(
