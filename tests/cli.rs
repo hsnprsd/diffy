@@ -21,6 +21,14 @@ fn help_and_version_do_not_need_a_repository_or_terminal() {
 }
 
 #[test]
+fn help_describes_inspecting_diffs_and_returning_to_files() {
+    let output = diffy().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("Enter inspect diff · Esc back to files"));
+}
+
+#[test]
 fn config_is_loaded_from_xdg_or_home_before_starting_the_ui() {
     let dir = tempfile::tempdir().unwrap();
     for use_xdg in [false, true] {

@@ -32,11 +32,11 @@ against the index's “ours” stage.
 
 Each action has one shortcut in the active preset. The default is **standard**;
 the built-in **vim** preset replaces navigation and worktree-deletion keys rather
-than adding aliases. `Tab` is the only pane-focus shortcut in both presets.
+than adding aliases. In both presets, `Enter` opens the selected file's diff for
+inspection, and `Esc` returns to Files without resetting the reading position.
 
 | Standard | Vim | Action |
 | --- | --- | --- |
-| `Tab` | `Tab` | Switch focus between files and diff |
 | `↓` | `j` | Select the next file / scroll down |
 | `↑` | `k` | Select the previous file / scroll up |
 | `PageDown` | `d` | Page down |
@@ -58,13 +58,13 @@ These shortcuts are shared by both presets:
 | `c` | Open the commit-message popup (staged changes, or all changes if nothing is staged) |
 | `p` | Pull the current branch (fast-forward only) |
 | `P` | Push the current branch |
-| `Esc` | Close help or a popup; cancel a running Git operation |
+| `Esc` | Return from Diff to Files; close help or a popup; cancel a running Git operation |
 | `e` | Open in your editor at the first visible hunk (Diff pane) or first file hunk (Files pane) |
 | `[` | Previous hunk |
 | `]` | Next hunk |
 | `?` | Show help |
 | `q` | Quit (outside popups) |
-| `Enter` | Switch to the selected worktree (picker only); insert a newline in a commit message |
+| `Enter` | Inspect the selected file's diff; switch to the selected worktree (picker only); insert a newline in a commit message |
 | `r` | Refresh the worktree picker |
 | `y` | Confirm worktree deletion |
 | `Ctrl+S` | Submit the commit message |
@@ -72,7 +72,7 @@ These shortcuts are shared by both presets:
 
 Commit-message editing uses ordinary text input, arrow keys, Home/End, and
 Backspace/Delete in both presets; it does not enter a Vim editing mode.
-`Shift+Tab`, `F1`, `Ctrl+C`, and inactive-preset navigation keys are not aliases.
+`Tab`, `Shift+Tab`, `F1`, `Ctrl+C`, and inactive-preset navigation keys are not aliases.
 
 Long diff lines wrap automatically to the pane width, preserving highlighting and
 keeping continuation lines aligned beneath the code. Line numbers and change
@@ -80,11 +80,13 @@ markers appear only on the first screen row of each source line. Scrolling and
 paging move through screen rows, including wrapped continuations.
 
 The footer shows a few actions for the focused pane: staging the selected file
-or hunk, switching panes, and help. Wider footers also show commit (Files) or
-hunk navigation (Diff). Press `?` for the full shortcut reference.
+or hunk, inspecting the diff or returning to Files, and help. Wider footers also
+show commit (Files) or hunk navigation (Diff). Press `?` for the full shortcut
+reference.
 
 The focused pane has a heavier, accent-colored border and a bold title. Below
-80 columns, only the focused pane is shown; `Tab` switches panes.
+80 columns, only the focused pane is shown; `Enter` opens Diff and `Esc` returns
+to Files. Closing a popup does not change the underlying pane focus.
 
 Press `t` from either pane to change themes immediately, including syntax and diff
 colors. Cycling wraps from the last theme to the first. The choice stays active

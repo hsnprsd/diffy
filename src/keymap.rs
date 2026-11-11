@@ -19,7 +19,6 @@ pub enum Action {
     Last,
     Left,
     Right,
-    Focus,
     Stage,
     Commit,
     Pull,
@@ -39,7 +38,7 @@ pub enum Action {
     NextTheme,
 }
 
-const ACTIONS: [Action; 26] = [
+const ACTIONS: [Action; 25] = [
     Action::Down,
     Action::Up,
     Action::PageDown,
@@ -48,7 +47,6 @@ const ACTIONS: [Action; 26] = [
     Action::Last,
     Action::Left,
     Action::Right,
-    Action::Focus,
     Action::Stage,
     Action::Commit,
     Action::Pull,
@@ -97,7 +95,7 @@ impl Keymap {
         use Action::*;
         use KeyCode::{
             Char, Delete, Down as ArrowDown, End, Enter, Esc, Home, Left as ArrowLeft,
-            PageDown as PgDown, PageUp as PgUp, Right as ArrowRight, Tab, Up as ArrowUp,
+            PageDown as PgDown, PageUp as PgUp, Right as ArrowRight, Up as ArrowUp,
         };
         match (self, action) {
             (Self::Standard, Down) => (ArrowDown, "↓"),
@@ -118,7 +116,6 @@ impl Keymap {
             (Self::Vim, Left) => (Char('h'), "h"),
             (Self::Vim, Right) => (Char('l'), "l"),
             (Self::Vim, DeleteWorktree) => (Char('D'), "D"),
-            (_, Focus) => (Tab, "Tab"),
             (_, Stage) => (Char(' '), "Space"),
             (_, Commit) => (Char('c'), "c"),
             (_, Pull) => (Char('p'), "p"),
@@ -196,7 +193,12 @@ mod tests {
     #[test]
     fn modifiers_and_removed_aliases_do_not_create_extra_shortcuts() {
         for keymap in [Keymap::Standard, Keymap::Vim] {
-            for code in [KeyCode::BackTab, KeyCode::F(1), KeyCode::Char('n')] {
+            for code in [
+                KeyCode::Tab,
+                KeyCode::BackTab,
+                KeyCode::F(1),
+                KeyCode::Char('n'),
+            ] {
                 assert_eq!(keymap.action(KeyEvent::new(code, KeyModifiers::NONE)), None);
             }
             for action in ACTIONS {

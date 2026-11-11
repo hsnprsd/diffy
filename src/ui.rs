@@ -130,9 +130,9 @@ fn footer_hints(app: &App, width: usize) -> String {
     }
     hints.push(
         if app.focus == Focus::Files {
-            "Tab diff"
+            "Enter inspect"
         } else {
-            "Tab files"
+            "Esc files"
         }
         .into(),
     );
@@ -814,7 +814,7 @@ fn help(frame: &mut Frame, area: Rect, keymap: Keymap, palette: &Palette) {
             Style::default().fg(palette.accent).bold(),
         ),
         Line::raw(""),
-        Line::raw("Tab                 Switch files / diff focus"),
+        Line::raw("Enter / Esc         Inspect diff / return to files"),
         Line::raw(format!(
             "{:<20}Select files / scroll diff",
             format!(
@@ -862,7 +862,7 @@ fn help(frame: &mut Frame, area: Rect, keymap: Keymap, palette: &Palette) {
             Style::default().fg(palette.muted),
         ),
         Line::styled(
-            "On narrow terminals, Tab switches panes.",
+            "Enter inspects the diff; Esc returns to files.",
             Style::default().fg(palette.muted),
         ),
         Line::raw(""),
@@ -1038,7 +1038,7 @@ mod tests {
             for keys in help_keys {
                 assert!(text.contains(keys), "{keymap:?}: {keys}");
             }
-            assert!(text.contains("Tab                 Switch files / diff focus"));
+            assert!(text.contains("Enter / Esc         Inspect diff / return to files"));
             for action in [
                 "Cycle through built-in themes",
                 "Choose a worktree",
@@ -1387,7 +1387,7 @@ mod tests {
                     assert_eq!(buffer[(diff_x, 1)].symbol(), "┌");
                     assert_eq!(buffer[(diff_x, 1)].fg, PALETTE.border);
                 }
-                app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+                app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
                 terminal.draw(|frame| draw(frame, &mut app)).unwrap();
                 app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE));
@@ -1415,43 +1415,92 @@ mod tests {
     }
 
     #[test]
+    fn inspect_and_return_preserve_position_in_both_presets_and_terminal_layouts() {
+        for (keymap, down) in [
+            (Keymap::Standard, KeyCode::Down),
+            (Keymap::Vim, KeyCode::Char('j')),
+        ] {
+            for width in [60, 120] {
+                let (dir, repo) = repo();
+                std::fs::write(dir.path().join("file.txt"), "line\n".repeat(80)).unwrap();
+                let mut app = App::new(repo).unwrap();
+                app.keymap = keymap;
+                let mut terminal = Terminal::new(TestBackend::new(width, 15)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                assert!(screen(&terminal).contains("Enter inspect"));
+
+                app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                app.handle_key(KeyEvent::new(down, KeyModifiers::NONE));
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                assert!(app.focus == Focus::Diff);
+                assert_eq!(app.scroll, 1);
+                assert!(screen(&terminal).contains("Esc files"));
+
+                app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                assert!(app.focus == Focus::Files);
+                assert_eq!(app.scroll, 1);
+                assert_eq!(terminal.backend().buffer()[(0, 1)].symbol(), "┏");
+                assert!(screen(&terminal).contains("Enter inspect"));
+
+                app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                assert!(app.focus == Focus::Diff);
+                assert_eq!(app.scroll, 1);
+                assert_eq!(
+                    app.selected().unwrap().path,
+                    std::path::Path::new("file.txt")
+                );
+                let diff_x = if width >= 80 {
+                    (width / 4).clamp(24, 42)
+                } else {
+                    0
+                };
+                assert_eq!(terminal.backend().buffer()[(diff_x, 1)].symbol(), "┏");
+                assert!(screen(&terminal).contains("Esc files"));
+            }
+        }
+    }
+
+    #[test]
     fn footer_hints_follow_focus_staging_state_and_available_width() {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("file.txt"), "new\n").unwrap();
         let mut app = App::new(repo).unwrap();
         assert_eq!(
             footer_hints(&app, 80),
-            " Space stage file · c commit · Tab diff · ? help"
+            " Space stage file · c commit · Enter inspect · ? help"
         );
         assert_eq!(
             footer_hints(&app, 40),
-            " Space stage file · Tab diff · ? help"
+            " Space stage file · Enter inspect · ? help"
         );
         app.focus = Focus::Diff;
         assert_eq!(
             footer_hints(&app, 80),
-            " Space stage hunk · [/] hunk · Tab files · ? help"
+            " Space stage hunk · [/] hunk · Esc files · ? help"
         );
         assert_eq!(
             footer_hints(&app, 40),
-            " Space stage hunk · Tab files · ? help"
+            " Space stage hunk · Esc files · ? help"
         );
         git(dir.path(), &["add", "."]);
         app.refresh();
         assert_eq!(
             footer_hints(&app, 80),
-            " Space unstage hunk · [/] hunk · Tab files · ? help"
+            " Space unstage hunk · [/] hunk · Esc files · ? help"
         );
         app.focus = Focus::Files;
         assert_eq!(
             footer_hints(&app, 80),
-            " Space unstage file · c commit · Tab diff · ? help"
+            " Space unstage file · c commit · Enter inspect · ? help"
         );
         std::fs::write(dir.path().join("binary"), b"\0binary").unwrap();
         app.refresh();
         app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         app.focus = Focus::Diff;
-        assert_eq!(footer_hints(&app, 80), " Tab files · ? help");
+        assert_eq!(footer_hints(&app, 80), " Esc files · ? help");
     }
 
     #[test]
@@ -1468,7 +1517,7 @@ mod tests {
         assert!(text.contains("[ ] M file.txt"));
         assert!(text.contains("[x] A file.txt"));
         assert!(text.contains("file.txt · Unstaged"));
-        for hint in ["Space stage file", "Tab diff", "c commit", "? help"] {
+        for hint in ["Space stage file", "Enter inspect", "c commit", "? help"] {
             assert!(text.contains(hint), "Missing hint: {hint}");
         }
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -1477,7 +1526,7 @@ mod tests {
         assert!(text.contains("Space unstage file"));
         assert!(text.contains("file.txt · Staged"));
         assert!(text.contains("Hunk 1/1"));
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(screen(&terminal).contains("Space unstage hunk 1/1"));
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
@@ -1514,8 +1563,8 @@ mod tests {
     #[test]
     fn staging_feedback_names_the_target_then_restores_footer_hints() {
         for (focus, target, hints) in [
-            (Focus::Files, "file", "c commit · Tab diff · ? help"),
-            (Focus::Diff, "hunk", "[/] hunk · Tab files · ? help"),
+            (Focus::Files, "file", "c commit · Enter inspect · ? help"),
+            (Focus::Diff, "hunk", "[/] hunk · Esc files · ? help"),
         ] {
             let (dir, repo) = repo();
             std::fs::write(dir.path().join("file.txt"), "new\n").unwrap();

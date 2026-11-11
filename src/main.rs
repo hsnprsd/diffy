@@ -36,7 +36,7 @@ fn main() -> Result<()> {
                  Uses the current directory; subdirectories are accepted.\n\
                  Staged and unstaged changes appear together in the Changes view.\n\
                  Updates automatically when repository files or refs change.\n\
-                 Standard keys: Tab focus · ↑/↓ move\n\
+                 Standard keys: Enter inspect diff · Esc back to files · ↑/↓ move\n\
                        Space stage/unstage file or hunk · c commit · p pull · P push\n\
                        w worktrees · e open editor · [/] hunks · ? help · q quit\n\
                        v toggle unified / side-by-side diff · t next theme\n\n\

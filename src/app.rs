@@ -834,13 +834,8 @@ impl App {
                 }
             }
             Some(Action::Help) => self.show_help = true,
-            Some(Action::Focus) => {
-                self.focus = if self.focus == Focus::Files {
-                    Focus::Diff
-                } else {
-                    Focus::Files
-                };
-            }
+            Some(Action::Select) => self.focus = Focus::Diff,
+            Some(Action::Close) => self.focus = Focus::Files,
             Some(Action::Down) => self.vertical(1),
             Some(Action::Up) => self.vertical(-1),
             Some(Action::PageDown) => {
@@ -871,30 +866,68 @@ mod tests {
     }
 
     #[test]
-    fn tab_is_the_only_pane_focus_shortcut_in_both_presets() {
+    fn enter_inspects_and_escape_returns_in_both_presets() {
         for keymap in [Keymap::Standard, Keymap::Vim] {
             let (dir, repo) = repo();
             std::fs::write(dir.path().join("a.txt"), "line\n".repeat(30)).unwrap();
             let mut app = App::new(repo).unwrap();
             app.keymap = keymap;
             app.scroll = 2;
-            for focus in [Focus::Diff, Focus::Files] {
-                assert!(!app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+            for (code, focus) in [
+                (KeyCode::Esc, Focus::Files),
+                (KeyCode::Enter, Focus::Diff),
+                (KeyCode::Enter, Focus::Diff),
+                (KeyCode::Esc, Focus::Files),
+                (KeyCode::Enter, Focus::Diff),
+            ] {
+                assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
                 assert!(app.focus == focus);
                 for code in [
+                    KeyCode::Tab,
+                    KeyCode::BackTab,
                     KeyCode::Left,
                     KeyCode::Right,
-                    KeyCode::Enter,
-                    KeyCode::BackTab,
                     KeyCode::Char('h'),
                     KeyCode::Char('l'),
                 ] {
                     app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
                     assert!(app.focus == focus);
                 }
+                app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+                assert!(app.focus == focus);
                 assert_eq!(app.selected().unwrap().path, PathBuf::from("a.txt"));
                 assert_eq!(app.scroll, 2);
             }
+        }
+    }
+
+    #[test]
+    fn popup_keys_do_not_change_underlying_diff_focus() {
+        for keymap in [Keymap::Standard, Keymap::Vim] {
+            let (dir, repo) = repo();
+            std::fs::write(dir.path().join("a.txt"), "line\n").unwrap();
+            let mut app = App::new(repo).unwrap();
+            app.keymap = keymap;
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            app.handle_key(key('?'));
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(!app.show_help);
+            assert!(app.focus == Focus::Diff);
+
+            app.handle_key(key('c'));
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(app.commit_popup.as_ref().unwrap().message, "\n");
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(app.commit_popup.is_none());
+            assert!(app.focus == Focus::Diff);
+
+            app.handle_key(key('w'));
+            assert!(app.worktree_popup.is_some());
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(app.worktree_popup.is_none());
+            assert!(app.focus == Focus::Diff);
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(app.focus == Focus::Files);
         }
     }
 
@@ -1007,7 +1040,7 @@ mod tests {
                 assert_eq!(app.selected().unwrap().path, PathBuf::from(path));
                 assert_eq!(app.scroll, 0);
             }
-            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             for (code, scroll) in [(down, 1), (down, 2), (up, 1), (up, 0)] {
                 app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
                 assert_eq!(app.selected().unwrap().path, PathBuf::from("a.txt"));
@@ -1337,7 +1370,7 @@ mod tests {
         app.viewport_height = 4;
         app.handle_key(key(']'));
         assert_eq!(app.scroll, app.view.hunks[1]);
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.handle_key(key('e'));
         assert_eq!(
             app.edit_request.take(),
@@ -1554,10 +1587,10 @@ mod tests {
         assert!(!staged_text.contains("changed 10\n"));
         assert!(!staged_text.contains("changed 80\n"));
         let working = std::fs::read_to_string(dir.path().join("a file.txt")).unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         // Select the staged entry in the same view.
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.selected().unwrap().staged);
         assert_eq!(app.view.hunks.len(), 1);
         app.handle_key(key(' '));

@@ -27,8 +27,8 @@ Then run from inside a Git working tree (or any of its subdirectories):
 diffy
 ```
 
-Use `↑` / `↓` to navigate and `Tab` to switch panes. Press `?` for shortcuts
-or `q` to quit. Browsing never modifies your files or index.
+Use `↑` / `↓` to navigate, `Enter` to inspect a diff, and `Esc` to return to Files.
+Press `?` for shortcuts or `q` to quit. Browsing never modifies your files or index.
 
 ## Usage guide
 
