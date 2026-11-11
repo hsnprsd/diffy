@@ -1,6 +1,6 @@
 # Build the optimized binary in target/release/diffy.
 build:
-    cargo build --release --locked
+    cargo build --release
 
 # Install the optimized binary into ~/.local/bin.
 install:
@@ -9,5 +9,5 @@ install:
 # Check formatting, lint all targets, and run the tests.
 check:
     cargo fmt --all --check
-    cargo clippy --all-targets --locked -- -D warnings
-    cargo test --all-targets --locked
+    cargo clippy --all-targets -- -D warnings
+    cargo test --all-targets

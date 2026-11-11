@@ -5,8 +5,8 @@ You need stable Rust, a C compiler, and Git 2.36+.
 ## Build and run
 
 ```sh
-cargo build --locked
-cargo run --locked
+cargo build
+cargo run
 ```
 
 With [just](https://github.com/casey/just), use `just build` for a release build
@@ -18,8 +18,8 @@ Run these before submitting:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --all-targets --locked
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
 ```
 
 Or run `just check` to perform all three.
