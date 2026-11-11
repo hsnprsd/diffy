@@ -55,6 +55,9 @@ cargo install --path . --locked
 cargo install --path . --locked --root "$HOME/.local"
 ```
 
+With [just](https://github.com/casey/just) installed, `just install` builds and
+installs into `~/.local/bin`.
+
 Ensure the chosen `bin` directory is on your `PATH`. No grammar downloads or
 runtime language-server setup are needed. The terminal controls the font;
 **IBM Plex Mono Medium** is recommended.
@@ -315,6 +318,16 @@ line-level highlighting. Display highlights never alter staging patches.
   apps, it cannot clean up after `SIGKILL`; use `reset` if necessary.
 
 ## Development
+
+With `just` installed:
+
+```sh
+just build    # Build target/release/diffy (optimized)
+just install  # Install into ~/.local/bin
+just check    # Check formatting, run Clippy, and run all tests
+```
+
+Cargo can also be used directly:
 
 ```sh
 cargo run -- /path/to/repository
