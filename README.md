@@ -20,11 +20,10 @@ cargo install --path . --locked
 Make sure `~/.cargo/bin` is on your `PATH`. Alternatively, `just install`
 installs into `~/.local/bin`. Syntax grammars are bundled; no extra setup is needed.
 
-Then run:
+Then run from inside a Git working tree (or any of its subdirectories):
 
 ```sh
-diffy                      # Current repository
-diffy /path/to/repository  # Another repository
+diffy
 ```
 
 Use `↑` / `↓` to navigate and `Tab` to switch panes. Press `?` for shortcuts

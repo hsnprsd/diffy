@@ -6,7 +6,7 @@ You need stable Rust, a C compiler, and Git 2.36+.
 
 ```sh
 cargo build --locked
-cargo run --locked -- /path/to/repository
+cargo run --locked
 ```
 
 With [just](https://github.com/casey/just), use `just build` for a release build

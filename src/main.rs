@@ -12,7 +12,7 @@ mod watch;
 use std::{
     env,
     io::{self, IsTerminal},
-    path::{Path, PathBuf},
+    path::Path,
     time::Duration,
 };
 
@@ -26,14 +26,13 @@ use crossterm::{
 use crate::{app::App, git::Repository, watch::Watcher};
 
 fn main() -> Result<()> {
-    let mut path = None;
     let mut positional = false;
     for arg in env::args_os().skip(1) {
         if !positional && (arg == "--help" || arg == "-h") {
             println!(
                 "diffy — live Git diffs with Tree-sitter highlighting\n\n\
-                 Usage: diffy [PATH]\n\n\
-                 PATH defaults to the current directory; subdirectories are accepted.\n\
+                 Usage: diffy [OPTIONS]\n\n\
+                 Uses the current directory; subdirectories are accepted.\n\
                  Staged and unstaged changes appear together in the Changes view.\n\
                  Updates automatically when repository files or refs change.\n\
                  Standard keys: Tab focus · ↑/↓ move\n\
@@ -56,12 +55,15 @@ fn main() -> Result<()> {
             positional = true;
         } else if !positional && arg.to_string_lossy().starts_with('-') {
             bail!("Unknown option {}. See diffy --help", arg.to_string_lossy());
-        } else if path.replace(PathBuf::from(arg)).is_some() {
-            bail!("Expected at most one repository path. See diffy --help");
+        } else {
+            bail!(
+                "Unexpected argument {}. See diffy --help",
+                arg.to_string_lossy()
+            );
         }
     }
     let config = config::Config::load()?;
-    let repo = Repository::discover(&path.unwrap_or(env::current_dir()?))?;
+    let repo = Repository::discover(&env::current_dir()?)?;
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("An interactive terminal is required. See diffy --help");
     }
@@ -186,7 +188,7 @@ mod tests {
         git::tests::{git, linked_repo, repo, text},
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use std::{fs, time::Instant};
+    use std::{fs, path::PathBuf, time::Instant};
 
     fn key(app: &mut App, code: KeyCode) {
         assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
