@@ -91,7 +91,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         )
     } else {
         Line::styled(
-            " v view · t theme · w worktrees · Space stage/unstage · c commit · p pull · P push · e edit · ? help · q quit",
+            footer_hints(app, chunks[2].width as usize),
             Style::default().fg(palette.muted),
         )
     };
@@ -113,6 +113,41 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     {
         operation_details(frame, area, details, app.keymap, palette);
     }
+}
+
+fn footer_hints(app: &App, width: usize) -> String {
+    let mut hints = Vec::new();
+    if let Some(entry) = app.selected()
+        && (app.focus == Focus::Files || !app.view.patches.is_empty())
+    {
+        let action = if entry.staged { "unstage" } else { "stage" };
+        let target = if app.focus == Focus::Files {
+            "file"
+        } else {
+            "hunk"
+        };
+        hints.push(format!("Space {action} {target}"));
+    }
+    hints.push(
+        if app.focus == Focus::Files {
+            "Tab diff"
+        } else {
+            "Tab files"
+        }
+        .into(),
+    );
+    hints.push("? help".into());
+    let extra = if app.focus == Focus::Files {
+        (!app.files.is_empty()).then_some("c commit")
+    } else {
+        (!app.view.patches.is_empty()).then_some("[/] hunk")
+    };
+    if let Some(extra) = extra
+        && 1 + hints.join(" · ").width() + 3 + extra.width() <= width
+    {
+        hints.insert(1, extra.into());
+    }
+    format!(" {}", hints.join(" · "))
 }
 
 fn pane(title: String, focused: bool, palette: &Palette) -> Block<'static> {
@@ -880,7 +915,7 @@ mod tests {
                 terminal.draw(|frame| draw(frame, &mut app)).unwrap();
                 let buffer = terminal.backend().buffer();
                 assert!(screen(&terminal).contains(name));
-                assert!(screen(&terminal).contains("t theme"));
+                assert!(screen(&terminal).contains("? help"));
                 assert_eq!(buffer[(1, 0)].fg, palette.bg, "{name}");
                 assert_eq!(buffer[(1, 0)].bg, palette.accent, "{name}");
                 assert_eq!(buffer[(139, 29)].bg, palette.panel, "{name}");
@@ -988,6 +1023,16 @@ mod tests {
                 assert!(text.contains(keys), "{keymap:?}: {keys}");
             }
             assert!(text.contains("Tab                 Switch files / diff focus"));
+            for action in [
+                "Cycle through built-in themes",
+                "Choose a worktree",
+                "Toggle unified",
+                "Pull (fast-forward only)",
+                "Open editor",
+                "Quit",
+            ] {
+                assert!(text.contains(action), "Missing help action: {action}");
+            }
             assert!(text.contains("Esc closes help"));
             app.show_help = false;
 
@@ -1296,6 +1341,46 @@ mod tests {
     }
 
     #[test]
+    fn footer_hints_follow_focus_staging_state_and_available_width() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("file.txt"), "new\n").unwrap();
+        let mut app = App::new(repo).unwrap();
+        assert_eq!(
+            footer_hints(&app, 80),
+            " Space stage file · c commit · Tab diff · ? help"
+        );
+        assert_eq!(
+            footer_hints(&app, 40),
+            " Space stage file · Tab diff · ? help"
+        );
+        app.focus = Focus::Diff;
+        assert_eq!(
+            footer_hints(&app, 80),
+            " Space stage hunk · [/] hunk · Tab files · ? help"
+        );
+        assert_eq!(
+            footer_hints(&app, 40),
+            " Space stage hunk · Tab files · ? help"
+        );
+        git(dir.path(), &["add", "."]);
+        app.refresh();
+        assert_eq!(
+            footer_hints(&app, 80),
+            " Space unstage hunk · [/] hunk · Tab files · ? help"
+        );
+        app.focus = Focus::Files;
+        assert_eq!(
+            footer_hints(&app, 80),
+            " Space unstage file · c commit · Tab diff · ? help"
+        );
+        std::fs::write(dir.path().join("binary"), b"\0binary").unwrap();
+        app.refresh();
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        app.focus = Focus::Diff;
+        assert_eq!(footer_hints(&app, 80), " Tab files · ? help");
+    }
+
+    #[test]
     fn staging_controls_and_commit_popup_are_visible() {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
@@ -1309,13 +1394,7 @@ mod tests {
         assert!(text.contains("[ ] M file.txt"));
         assert!(text.contains("[x] A file.txt"));
         assert!(text.contains("file.txt · Unstaged"));
-        for hint in [
-            "Space stage file",
-            "Space stage/unstage",
-            "c commit",
-            "p pull",
-            "P push",
-        ] {
+        for hint in ["Space stage file", "Tab diff", "c commit", "? help"] {
             assert!(text.contains(hint), "Missing hint: {hint}");
         }
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -1456,7 +1535,7 @@ mod tests {
         let mut app = App::new(repo).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert!(screen(&terminal).contains("w worktrees"));
+        assert!(screen(&terminal).contains("? help"));
         app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         let popup = app.worktree_popup.as_mut().unwrap();
         popup.worktrees[1].locked = true;

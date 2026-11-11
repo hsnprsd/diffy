@@ -79,6 +79,10 @@ keeping continuation lines aligned beneath the code. Line numbers and change
 markers appear only on the first screen row of each source line. Scrolling and
 paging move through screen rows, including wrapped continuations.
 
+The footer shows a few actions for the focused pane: staging the selected file
+or hunk, switching panes, and help. Wider footers also show commit (Files) or
+hunk navigation (Diff). Press `?` for the full shortcut reference.
+
 Below 80 columns, only the focused pane is shown; `Tab` switches panes.
 
 Press `t` from either pane to change themes immediately, including syntax and diff
