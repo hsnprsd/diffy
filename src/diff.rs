@@ -1,13 +1,17 @@
-use std::{path::Path, time::Duration};
+use std::{
+    ops::Range,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use ratatui::text::Span;
-use similar::{Algorithm, ChangeTag, TextDiff};
+use similar::{Algorithm, ChangeTag, DiffTag, TextDiff};
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
     git::Content,
-    highlight::{Language, SyntaxHighlighter},
+    highlight::{ADD_WORD_BG, DEL_WORD_BG, Language, SyntaxHighlighter},
 };
 
 const MAX_LINES: usize = 40_000;
@@ -108,12 +112,14 @@ impl DiffView {
                 "No textual changes (file mode or metadata may have changed)",
             ));
         }
-        let old_lines = highlighter.lines(path, &old)?;
-        let new_lines = highlighter.lines(path, &new)?;
         let diff = TextDiff::configure()
             .algorithm(Algorithm::Myers)
             .timeout(Duration::from_millis(500))
             .diff_lines(&old, &new);
+        let (old_emphasis, new_emphasis) =
+            word_emphasis(&diff, Instant::now() + Duration::from_millis(100));
+        let old_lines = highlighter.lines(path, &old, &old_emphasis, DEL_WORD_BG)?;
+        let new_lines = highlighter.lines(path, &new, &new_emphasis, ADD_WORD_BG)?;
         let mut view = Self {
             language: Language::detect(path),
             number_width: line_count.max(1).to_string().len(),
@@ -189,6 +195,52 @@ impl DiffView {
     }
 }
 
+/// Find raw byte ranges before display escaping or tab expansion changes their offsets.
+fn word_emphasis<'a>(
+    diff: &'a TextDiff<'a, 'a, 'a, str>,
+    deadline: Instant,
+) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    let offsets = |lines: &[&str]| {
+        let mut offset = 0;
+        lines
+            .iter()
+            .map(|line| {
+                let start = offset;
+                offset += line.len();
+                start
+            })
+            .collect::<Vec<_>>()
+    };
+    let old_offsets = offsets(diff.old_slices());
+    let new_offsets = offsets(diff.new_slices());
+    let mut old_ranges = Vec::new();
+    let mut new_ranges = Vec::new();
+    // Share one budget across the file, rather than allowing a timeout per replacement.
+    for op in diff.ops() {
+        if Instant::now() >= deadline {
+            break;
+        }
+        if op.tag() != DiffTag::Replace {
+            continue;
+        }
+        for change in diff.iter_inline_changes_deadline(op, Some(deadline)) {
+            let (mut offset, ranges) = match change.tag() {
+                ChangeTag::Delete => (old_offsets[change.old_index().unwrap()], &mut old_ranges),
+                ChangeTag::Insert => (new_offsets[change.new_index().unwrap()], &mut new_ranges),
+                ChangeTag::Equal => continue,
+            };
+            for &(emphasized, text) in change.values() {
+                let end = offset + text.len();
+                if emphasized && offset < end {
+                    ranges.push(offset..end);
+                }
+                offset = end;
+            }
+        }
+    }
+    (old_ranges, new_ranges)
+}
+
 impl DiffRow {
     pub fn gutter_width(&self, number_width: usize) -> usize {
         if matches!(self.kind, RowKind::Hunk | RowKind::Note) {
@@ -220,6 +272,165 @@ mod tests {
             &mut SyntaxHighlighter::default(),
         )
         .unwrap()
+    }
+
+    fn row_text(row: &DiffRow) -> String {
+        row.spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    fn emphasized_text(row: &DiffRow) -> String {
+        row.spans
+            .iter()
+            .filter(|span| matches!(span.style.bg, Some(ADD_WORD_BG | DEL_WORD_BG)))
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn emphasizes_changed_words_without_recoloring_syntax() {
+        let old = "let result = compute(10, \"old\");\n";
+        let new = "let result = compute(20, \"new\");\n";
+        let view = build(old, new);
+        for (row, source, words, background) in [
+            (&view.rows[1], old, "10old", DEL_WORD_BG),
+            (&view.rows[2], new, "20new", ADD_WORD_BG),
+        ] {
+            assert_eq!(row_text(row), source.trim_end_matches('\n'));
+            assert_eq!(emphasized_text(row), words);
+            let syntax = SyntaxHighlighter::default()
+                .lines(Path::new("test.rs"), source, &[], background)
+                .unwrap();
+            let colors = |spans: &[Span<'_>]| {
+                spans
+                    .iter()
+                    .flat_map(|span| span.content.chars().map(|ch| (ch, span.style.fg)))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(colors(&row.spans), colors(&syntax[0]));
+            assert!(
+                row.spans
+                    .iter()
+                    .any(|span| span.style.bg == Some(background))
+            );
+        }
+    }
+
+    #[test]
+    fn word_boundaries_include_adjacent_code_punctuation() {
+        let view = build("if value == 1 { call(); }\n", "if value != 1 { call(); }\n");
+        assert_eq!(emphasized_text(&view.rows[1]), "=");
+        assert_eq!(emphasized_text(&view.rows[2]), "!");
+    }
+
+    #[test]
+    fn word_emphasis_tracks_unequal_replacement_blocks_and_context() {
+        let view = build(
+            "unchanged\nlet value = old;\ntail\n",
+            "unchanged\nlet value = new;\nextra\ntail\n",
+        );
+        let rows: Vec<_> = view
+            .rows
+            .iter()
+            .skip(1)
+            .map(|row| (row.kind, row_text(row), emphasized_text(row)))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (RowKind::Context, "unchanged".into(), "".into()),
+                (RowKind::Removed, "let value = old;".into(), "old".into()),
+                (RowKind::Added, "let value = new;".into(), "new".into()),
+                (RowKind::Added, "extra".into(), "extra".into()),
+                (RowKind::Context, "tail".into(), "".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn word_emphasis_tracks_separate_hunks_and_multiple_words() {
+        let old: String = (0..20)
+            .map(|n| format!("let value_{n} = compute({n});\n"))
+            .collect();
+        let new = old
+            .replace("compute(1)", "calculate(101)")
+            .replace("compute(18)", "calculate(118)");
+        let view = build(&old, &new);
+        assert_eq!(view.hunks.len(), 2);
+        let changed: Vec<_> = view
+            .rows
+            .iter()
+            .filter(|row| matches!(row.kind, RowKind::Added | RowKind::Removed))
+            .map(emphasized_text)
+            .collect();
+        assert_eq!(
+            changed,
+            ["compute1", "calculate101", "compute18", "calculate118"]
+        );
+    }
+
+    #[test]
+    fn unicode_words_and_combining_marks_are_emphasized_intact() {
+        for (old_word, new_word) in [("café", "thé"), ("e\u{301}", "a\u{301}"), ("界", "海")] {
+            let old = format!("let label = \"{old_word}\";\n");
+            let new = format!("let label = \"{new_word}\";\n");
+            let view = build(&old, &new);
+            assert_eq!(row_text(&view.rows[1]), old.trim_end_matches('\n'));
+            assert_eq!(row_text(&view.rows[2]), new.trim_end_matches('\n'));
+            assert_eq!(emphasized_text(&view.rows[1]), old_word);
+            assert_eq!(emphasized_text(&view.rows[2]), new_word);
+        }
+    }
+
+    #[test]
+    fn pure_additions_and_deletions_keep_line_only_shading() {
+        for (old, new, expected) in [
+            ("", "added\n", vec![(RowKind::Added, "added")]),
+            ("removed\n", "", vec![(RowKind::Removed, "removed")]),
+        ] {
+            let view = build(old, new);
+            let rows: Vec<_> = view
+                .rows
+                .iter()
+                .skip(1)
+                .map(|row| {
+                    assert!(row.spans.iter().all(|span| span.style.bg.is_none()));
+                    (row.kind, row_text(row))
+                })
+                .collect();
+            assert_eq!(
+                rows,
+                expected
+                    .into_iter()
+                    .map(|(kind, text)| (kind, text.to_owned()))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn expired_word_diff_budget_returns_line_only_highlighting() {
+        let diff = TextDiff::from_lines("let value = old;\n", "let value = new;\n");
+        assert_eq!(
+            word_emphasis(&diff, Instant::now() - Duration::from_millis(1)),
+            (Vec::new(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn word_highlighting_preserves_raw_patches_and_missing_newline_notes() {
+        let old = "let value = 10;\r\n";
+        let new = "let value = 20;";
+        let view = build(old, new);
+        assert_eq!(emphasized_text(&view.rows[1]), "10");
+        assert_eq!(emphasized_text(&view.rows[2]), "20");
+        assert_eq!(view.rows[3].kind, RowKind::Note);
+        assert_eq!(
+            view.patches,
+            [
+                "@@ -1,1 +1,1 @@\n-let value = 10;\r\n+let value = 20;\n\\ No newline at end of file\n"
+            ]
+        );
+        assert_eq!(view.source, Some((old.into(), new.into())));
     }
 
     #[test]
@@ -331,5 +542,9 @@ mod tests {
     fn crlf_unicode_and_newline_only_changes() {
         let view = build("let 界 = \"é\";\r\n", "let 界 = \"é\";");
         assert_eq!((view.additions, view.deletions), (1, 1));
+        assert_eq!(row_text(&view.rows[1]), "let 界 = \"é\";");
+        assert_eq!(row_text(&view.rows[2]), "let 界 = \"é\";");
+        assert_eq!(emphasized_text(&view.rows[1]), "");
+        assert_eq!(emphasized_text(&view.rows[2]), "");
     }
 }

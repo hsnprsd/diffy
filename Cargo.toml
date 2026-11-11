@@ -10,7 +10,7 @@ crossterm = "0.28"
 notify = "8"
 ratatui = "0.29"
 shlex = "2"
-similar = "2.7"
+similar = { version = "2.7", features = ["inline", "unicode"] }
 tree-sitter-highlight = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"

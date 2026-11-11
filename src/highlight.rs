@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, ops::Range, path::Path};
 
 use anyhow::{Context, Result};
 use ratatui::{
@@ -11,6 +11,8 @@ use unicode_width::UnicodeWidthChar;
 use crate::git::safe_text;
 
 pub const TEXT: Color = Color::Rgb(212, 212, 212);
+pub const ADD_WORD_BG: Color = Color::Rgb(24, 70, 32);
+pub const DEL_WORD_BG: Color = Color::Rgb(84, 24, 30);
 const CAPTURES: &[&str] = &[
     "attribute",
     "boolean",
@@ -183,8 +185,15 @@ pub struct SyntaxHighlighter {
 
 impl SyntaxHighlighter {
     /// Parse complete revisions, not isolated diff lines, to preserve multiline scopes.
-    pub fn lines(&mut self, path: &Path, source: &str) -> Result<Vec<Vec<Span<'static>>>> {
-        let mut builder = LineBuilder::new(source);
+    /// Emphasis ranges are sorted, non-overlapping byte ranges in the original source.
+    pub fn lines(
+        &mut self,
+        path: &Path,
+        source: &str,
+        emphasis: &[Range<usize>],
+        emphasis_background: Color,
+    ) -> Result<Vec<Vec<Span<'static>>>> {
+        let mut builder = LineBuilder::new(source, emphasis, emphasis_background);
         let Some(language) = Language::detect(path) else {
             builder.source(0, source.len(), TEXT);
             return Ok(builder.finish());
@@ -213,14 +222,20 @@ impl SyntaxHighlighter {
 
 struct LineBuilder<'a> {
     source: &'a str,
+    emphasis: &'a [Range<usize>],
+    emphasis_background: Color,
+    emphasis_index: usize,
     lines: Vec<Vec<Span<'static>>>,
     column: usize,
 }
 
 impl<'a> LineBuilder<'a> {
-    fn new(source: &'a str) -> Self {
+    fn new(source: &'a str, emphasis: &'a [Range<usize>], emphasis_background: Color) -> Self {
         Self {
             source,
+            emphasis,
+            emphasis_background,
+            emphasis_index: 0,
             lines: vec![Vec::new()],
             column: 0,
         }
@@ -228,10 +243,33 @@ impl<'a> LineBuilder<'a> {
 
     fn source(&mut self, start: usize, end: usize, color: Color) {
         let mut text = String::new();
+        let base = Style::default().fg(color);
+        let mut style = base;
         for (offset, ch) in self.source[start..end].char_indices() {
+            let position = start + offset;
+            while self
+                .emphasis
+                .get(self.emphasis_index)
+                .is_some_and(|range| range.end <= position)
+            {
+                self.emphasis_index += 1;
+            }
+            let next_style = if self
+                .emphasis
+                .get(self.emphasis_index)
+                .is_some_and(|range| range.contains(&position))
+            {
+                base.bg(self.emphasis_background)
+            } else {
+                base
+            };
+            if style != next_style {
+                self.push(std::mem::take(&mut text), style);
+                style = next_style;
+            }
             match ch {
                 '\n' => {
-                    self.push(std::mem::take(&mut text), color);
+                    self.push(std::mem::take(&mut text), style);
                     self.lines.push(Vec::new());
                     self.column = 0;
                 }
@@ -252,15 +290,15 @@ impl<'a> LineBuilder<'a> {
                 }
             }
         }
-        self.push(text, color);
+        self.push(text, style);
     }
 
-    fn push(&mut self, text: String, color: Color) {
+    fn push(&mut self, text: String, style: Style) {
         if !text.is_empty() {
             self.lines
                 .last_mut()
                 .unwrap()
-                .push(Span::styled(text, Style::default().fg(color)));
+                .push(Span::styled(text, style));
         }
     }
 
@@ -301,7 +339,7 @@ mod tests {
     fn multiline_comments_keep_their_scope() {
         let source = "/* begin\n  still a comment\n*/\nfn main() {}\n";
         let lines = SyntaxHighlighter::default()
-            .lines(Path::new("test.rs"), source)
+            .lines(Path::new("test.rs"), source, &[], Color::Reset)
             .unwrap();
         assert_eq!(lines.len(), 4);
         assert!(lines[1].iter().all(|span| span.style.fg == Some(COLORS[2])));
@@ -311,7 +349,12 @@ mod tests {
     #[test]
     fn plain_text_is_safe_and_tabs_align() {
         let lines = SyntaxHighlighter::default()
-            .lines(Path::new("test.txt"), "a\tb\r\n界\tx\x1b")
+            .lines(
+                Path::new("test.txt"),
+                "a\tb\r\n界\tx\x1b",
+                &[],
+                Color::Reset,
+            )
             .unwrap();
         let text: Vec<String> = lines
             .iter()
@@ -321,11 +364,77 @@ mod tests {
     }
 
     #[test]
+    fn raw_emphasis_ranges_follow_tab_expansion_controls_and_crlf() {
+        let lines = SyntaxHighlighter::default()
+            .lines(
+                Path::new("test.txt"),
+                "a\t界\x1b\r\nb\té\n",
+                &[1..6, 9..12],
+                ADD_WORD_BG,
+            )
+            .unwrap();
+        let text = |line: &[Span<'_>], background: Option<Color>| {
+            line.iter()
+                .filter(|span| span.style.bg == background)
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        assert_eq!(text(&lines[0], None), "a");
+        assert_eq!(text(&lines[0], Some(ADD_WORD_BG)), "   界\\u{1b}");
+        assert_eq!(text(&lines[1], None), "b");
+        assert_eq!(text(&lines[1], Some(ADD_WORD_BG)), "   é");
+        assert!(
+            lines
+                .iter()
+                .flatten()
+                .all(|span| span.style.fg == Some(TEXT))
+        );
+    }
+
+    #[test]
+    fn emphasis_crosses_syntax_captures_without_changing_foregrounds() {
+        let source = "let value = 42;\n";
+        let mut highlighter = SyntaxHighlighter::default();
+        let plain = highlighter
+            .lines(Path::new("test.rs"), source, &[], Color::Reset)
+            .unwrap();
+        let emphasized = highlighter
+            .lines(
+                Path::new("test.rs"),
+                source,
+                std::slice::from_ref(&(0..14)),
+                ADD_WORD_BG,
+            )
+            .unwrap();
+        let characters = |lines: Vec<Vec<Span<'_>>>| {
+            lines
+                .into_iter()
+                .flatten()
+                .flat_map(|span| {
+                    span.content
+                        .chars()
+                        .map(|ch| (ch, span.style.fg, span.style.bg))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let plain = characters(plain);
+        let emphasized = characters(emphasized);
+        assert_eq!(plain.len(), emphasized.len());
+        for (index, ((ch, fg, _), emphasized)) in plain.into_iter().zip(emphasized).enumerate() {
+            assert_eq!(
+                emphasized,
+                (ch, fg, if index < 14 { Some(ADD_WORD_BG) } else { None })
+            );
+        }
+    }
+
+    #[test]
     fn trailing_newlines_do_not_add_phantom_lines() {
         for (source, count) in [("", 0), ("\n", 1), ("a\n\n", 2), ("a", 1)] {
             assert_eq!(
                 SyntaxHighlighter::default()
-                    .lines(Path::new("x.rs"), source)
+                    .lines(Path::new("x.rs"), source, &[], Color::Reset)
                     .unwrap()
                     .len(),
                 count

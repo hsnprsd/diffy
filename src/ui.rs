@@ -715,6 +715,65 @@ mod tests {
     }
 
     #[test]
+    fn word_backgrounds_and_syntax_colors_survive_wrapping_and_rendering() {
+        use crate::{
+            diff::DiffView,
+            git::Content,
+            highlight::{ADD_WORD_BG, DEL_WORD_BG, SyntaxHighlighter},
+        };
+
+        let mut view = DiffView::build(
+            std::path::Path::new("test.rs"),
+            Content::Text("let label = \"start obsolete_value end\";\n".into()),
+            Content::Text("let label = \"start replacement_value end\";\n".into()),
+            &mut SyntaxHighlighter::default(),
+        )
+        .unwrap();
+        let patches = view.patches.clone();
+        for width in [20, 28, 80] {
+            view.wrap(width);
+            let lines: Vec<_> = view
+                .wrapped_rows
+                .iter()
+                .map(|wrapped| render_row(&view.rows[wrapped.row], wrapped, 1, width))
+                .collect();
+            let mut terminal =
+                Terminal::new(TestBackend::new(width as u16, lines.len() as u16)).unwrap();
+            terminal
+                .draw(|frame| frame.render_widget(Paragraph::new(lines), frame.area()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            for (background, word) in [
+                (DEL_WORD_BG, "obsolete_value"),
+                (ADD_WORD_BG, "replacement_value"),
+            ] {
+                let highlighted: String = buffer
+                    .content
+                    .iter()
+                    .filter(|cell| cell.bg == background)
+                    .map(|cell| {
+                        assert_eq!(cell.fg, GREEN); // Tree-sitter's string color.
+                        cell.symbol()
+                    })
+                    .collect();
+                assert_eq!(highlighted, word);
+            }
+            for (y, wrapped) in view.wrapped_rows.iter().enumerate() {
+                let row = &view.rows[wrapped.row];
+                let background = match row.kind {
+                    RowKind::Added => ADD_BG,
+                    RowKind::Removed => DEL_BG,
+                    _ => continue,
+                };
+                for x in 0..row.gutter_width(1) {
+                    assert_eq!(buffer[(x as u16, y as u16)].bg, background);
+                }
+            }
+        }
+        assert_eq!(view.patches, patches);
+    }
+
+    #[test]
     fn long_lines_scroll_through_continuations_to_the_end() {
         let (dir, repo) = repo();
         std::fs::write(

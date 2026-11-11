@@ -6,6 +6,9 @@ Ratatui, Tree-sitter, and native filesystem notifications.
 - **Syntax-aware unified diffs:** both revisions are parsed in full by Tree-sitter,
   preserving multiline comments and strings. Added/removed lines have distinct
   backgrounds, with old/new line numbers and three lines of context.
+- **Word-level highlighting:** changed words and punctuation within replacement
+  blocks get brighter red/green backgrounds while retaining syntax colors.
+  Unicode word boundaries, wrapped lines, and expanded tabs are supported.
 - **Live updates:** edits, creates, deletes, renames, staging, commits, and branch
   changes trigger a debounced refresh. Selection and scroll position are preserved
   where possible. Git object writes and file-access events are ignored.
@@ -257,6 +260,13 @@ common Bash dotfile names). Unknown languages are displayed as plain text;
 embedded-language injections are not currently highlighted. Tabs use four-column
 stops, and line wrapping keeps wide Unicode characters intact.
 
+Word-level highlighting is enabled automatically for replacement blocks in both
+staged and unstaged diffs, including plain-text files. Brighter red/green backgrounds
+emphasize changed words and punctuation without replacing syntax colors; entire
+file additions/deletions retain ordinary line shading. Word comparisons share a
+100 ms budget per file, so expensive or later replacement blocks may retain only
+line-level highlighting. Display highlights never alter staging patches.
+
 ## Limits and troubleshooting
 
 - Binary/non-UTF-8 files, submodules, and special files show a notice instead of a
@@ -291,7 +301,9 @@ entries, staging-aware selection on refresh, conflicts, binary/large files,
 unusual paths, submodules, linked worktree discovery and switching (including
 watcher and write-operation targeting, picker navigation, and failed switches),
 confirmed worktree removal and dirty/locked/current/main worktree protections, all
-bundled highlighting queries, diff hunks, keyboard navigation, editor commands
+bundled highlighting queries, word-level changes (including Unicode, punctuation,
+syntax-color preservation, wrapped rendering, and unchanged staging patches), diff
+hunks, keyboard navigation, editor commands
 and visible-hunk line mapping, small terminal layouts, filesystem/index/ref
 notifications, and CLI errors. Staging/commit tests cover whole files, individual
 hunks, stale previews, unusual paths, CRLF/missing newlines, Unicode message
