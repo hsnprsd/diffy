@@ -14,26 +14,16 @@ use crate::{
     app::{App, CommitPopup, Focus, Status},
     diff::{DiffMode, DiffRow, DiffView, RowKind, SplitRow, WrappedRow, split_widths},
     git::safe_text,
-    highlight::TEXT,
     keymap::{Action, Keymap},
     operation::{OperationDetails, OperationResult},
+    theme::Palette,
 };
 
-const BG: Color = Color::Rgb(0, 0, 0);
-const PANEL: Color = Color::Rgb(10, 10, 10);
-const MUTED: Color = Color::Rgb(128, 128, 128);
-const BORDER: Color = Color::Rgb(48, 48, 48);
-const ACCENT: Color = Color::Rgb(122, 162, 247);
-const GREEN: Color = Color::Rgb(158, 206, 106);
-const RED: Color = Color::Rgb(247, 118, 142);
-const ADD_BG: Color = Color::Rgb(8, 28, 14);
-const DEL_BG: Color = Color::Rgb(32, 10, 12);
-const HUNK_BG: Color = Color::Rgb(24, 24, 24);
-
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    let palette = app.theme().palette();
     let area = frame.area();
     frame.render_widget(
-        Block::default().style(Style::default().bg(BG).fg(TEXT)),
+        Block::default().style(Style::default().bg(palette.bg).fg(palette.text)),
         area,
     );
     let chunks = Layout::vertical([
@@ -49,14 +39,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .unwrap_or_default()
         .to_string_lossy();
     let header = Line::from(vec![
-        Span::styled(" diffy ", Style::default().fg(BG).bg(ACCENT).bold()),
+        Span::styled(
+            " diffy ",
+            Style::default().fg(palette.bg).bg(palette.accent).bold(),
+        ),
         Span::styled(
             format!("  {}", safe_text(&repo_name)),
             Style::default().bold(),
         ),
         Span::styled(
-            format!("  /  {}", safe_text(&app.branch)),
-            Style::default().fg(MUTED),
+            format!("  /  {}  ·  {}", safe_text(&app.branch), app.theme().name()),
+            Style::default().fg(palette.muted),
         ),
     ]);
     frame.render_widget(Paragraph::new(header), chunks[0]);
@@ -80,57 +73,66 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 " {label}… · Esc cancel · {}",
                 safe_text(details.summary(true))
             ),
-            Style::default().fg(ACCENT),
+            Style::default().fg(palette.accent),
         )
     } else if let Some(error) = &app.error {
-        Line::styled(format!(" {}", safe_text(error)), Style::default().fg(RED))
+        Line::styled(
+            format!(" {}", safe_text(error)),
+            Style::default().fg(palette.red),
+        )
     } else if let Some(status) = &app.status {
         Line::styled(
             format!(" {}", safe_text(status.message())),
             Style::default().fg(match status {
-                Status::Success(_) => GREEN,
-                Status::Error(_) => RED,
-                Status::Cancelled(_) => ACCENT,
+                Status::Success(_) => palette.green,
+                Status::Error(_) => palette.red,
+                Status::Cancelled(_) => palette.accent,
             }),
         )
     } else {
         Line::styled(
-            " v view · w worktrees · Space stage/unstage · c commit · p pull · P push · e edit · ? help · q quit",
-            Style::default().fg(MUTED),
+            " v view · t theme · w worktrees · Space stage/unstage · c commit · p pull · P push · e edit · ? help · q quit",
+            Style::default().fg(palette.muted),
         )
     };
     frame.render_widget(
-        Paragraph::new(footer).style(Style::default().bg(PANEL)),
+        Paragraph::new(footer).style(Style::default().bg(palette.panel)),
         chunks[2],
     );
     if app.worktree_popup.is_some() {
         worktree_popup(frame, area, app);
     }
     if let Some(popup) = &app.commit_popup {
-        commit_popup(frame, area, popup, app.operation_label().is_some());
+        commit_popup(frame, area, popup, app.operation_label().is_some(), palette);
     }
     if app.show_help {
-        help(frame, area, app.keymap);
+        help(frame, area, app.keymap, palette);
     }
     if app.show_operation_details
         && let Some(details) = &mut app.operation_details
     {
-        operation_details(frame, area, details, app.keymap);
+        operation_details(frame, area, details, app.keymap, palette);
     }
 }
 
-fn pane(title: String, focused: bool) -> Block<'static> {
+fn pane(title: String, focused: bool, palette: &Palette) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(Style::default().fg(if focused { ACCENT } else { BORDER }))
-        .style(Style::default().fg(TEXT).bg(BG))
+        .border_style(Style::default().fg(if focused {
+            palette.accent
+        } else {
+            palette.border
+        }))
+        .style(Style::default().fg(palette.text).bg(palette.bg))
 }
 
 fn files(frame: &mut Frame, app: &mut App, area: Rect) {
+    let palette = app.theme().palette();
     let block = pane(
         format!(" Files {} ", app.files.len()),
         app.focus == Focus::Files,
+        palette,
     )
     .title_bottom(if app.selected().is_some_and(|entry| entry.staged) {
         " Space unstage file "
@@ -143,13 +145,17 @@ fn files(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|entry| {
             let color = match entry.status {
-                'A' | '?' => GREEN,
-                'D' | 'U' => RED,
-                _ => ACCENT,
+                'A' | '?' => palette.green,
+                'D' | 'U' => palette.red,
+                _ => palette.accent,
             };
             let mut spans = vec![Span::styled(
                 if entry.staged { "[x] " } else { "[ ] " },
-                Style::default().fg(if entry.staged { GREEN } else { MUTED }),
+                Style::default().fg(if entry.staged {
+                    palette.green
+                } else {
+                    palette.muted
+                }),
             )];
             spans.push(Span::styled(
                 format!("{} ", entry.status),
@@ -162,17 +168,22 @@ fn files(frame: &mut Frame, app: &mut App, area: Rect) {
     let list = List::new(items)
         .block(block)
         .highlight_symbol("▸ ")
-        .highlight_style(Style::default().bg(HUNK_BG).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .bg(palette.hunk_bg)
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_stateful_widget(list, area, &mut app.list_state);
     if app.files.is_empty() {
         frame.render_widget(
-            Paragraph::new(" No changes").style(Style::default().fg(MUTED)),
+            Paragraph::new(" No changes").style(Style::default().fg(palette.muted)),
             inner,
         );
     }
 }
 
 fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
+    let palette = app.theme().palette();
     let title = app
         .selected()
         .map(|entry| {
@@ -183,7 +194,7 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
             )
         })
         .unwrap_or_else(|| "Changes".into());
-    let block = pane(String::new(), app.focus == Focus::Diff);
+    let block = pane(String::new(), app.focus == Focus::Diff, palette);
     let inner = block.inner(area);
     let mode = app.diff_mode.effective(inner.width as usize);
     let mode_label = if mode != app.diff_mode {
@@ -213,12 +224,12 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
         )),
         Span::styled(
             format!("+{}", app.view.additions),
-            Style::default().fg(GREEN),
+            Style::default().fg(palette.green),
         ),
         Span::raw(" / "),
         Span::styled(
             format!("-{} ", app.view.deletions),
-            Style::default().fg(RED),
+            Style::default().fg(palette.red),
         ),
     ]);
     summary.spans.push(Span::styled(
@@ -227,7 +238,7 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             "· Space stage hunk "
         },
-        Style::default().fg(MUTED),
+        Style::default().fg(palette.muted),
     ));
     frame.render_widget(block.title_bottom(summary), area);
     if mode == DiffMode::SideBySide {
@@ -239,7 +250,7 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         frame.render_widget(
             Paragraph::new(format!("{before:<old_width$}│{after:<new_width$}"))
-                .style(Style::default().fg(MUTED).bg(PANEL)),
+                .style(Style::default().fg(palette.muted).bg(palette.panel)),
             Rect::new(inner.x, inner.y, inner.width, header_height),
         );
     }
@@ -256,6 +267,7 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
                     &app.view,
                     &app.view.split_rows[index],
                     content.width as usize,
+                    palette,
                 )
             } else {
                 render_row(
@@ -263,6 +275,7 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
                     wrapped,
                     app.view.number_width.max(1),
                     content.width as usize,
+                    palette,
                 )
             }
         })
@@ -276,20 +289,20 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .thumb_style(Style::default().fg(ACCENT))
-                .track_style(Style::default().fg(BORDER)),
+                .thumb_style(Style::default().fg(palette.accent))
+                .track_style(Style::default().fg(palette.border)),
             area,
             &mut state,
         );
     }
 }
 
-fn row_theme(kind: RowKind) -> (char, Color, Color) {
+fn row_theme(kind: RowKind, palette: &Palette) -> (char, Color, Color) {
     match kind {
-        RowKind::Added => ('+', GREEN, ADD_BG),
-        RowKind::Removed => ('-', RED, DEL_BG),
-        RowKind::Hunk => (' ', ACCENT, HUNK_BG),
-        RowKind::Note | RowKind::Context => (' ', MUTED, BG),
+        RowKind::Added => ('+', palette.green, palette.add_bg),
+        RowKind::Removed => ('-', palette.red, palette.del_bg),
+        RowKind::Hunk => (' ', palette.accent, palette.hunk_bg),
+        RowKind::Note | RowKind::Context => (' ', palette.muted, palette.bg),
     }
 }
 
@@ -298,8 +311,9 @@ fn render_row(
     wrapped: &WrappedRow,
     number_width: usize,
     width: usize,
+    palette: &Palette,
 ) -> Line<'static> {
-    let (marker, fg, bg) = row_theme(row.kind);
+    let (marker, fg, bg) = row_theme(row.kind, palette);
     let available = width
         .saturating_sub(row.gutter_width(number_width))
         .min(wrapped.width);
@@ -322,20 +336,34 @@ fn render_row(
     );
     let mut spans = vec![Span::styled(gutter, Style::default().fg(fg))];
     spans.extend(clip_spans(&row.spans, wrapped.offset, available));
-    Line::from(spans).style(Style::default().fg(TEXT).bg(bg))
+    Line::from(spans).style(Style::default().fg(palette.text).bg(bg))
 }
 
-fn render_split_row(view: &DiffView, row: &SplitRow, width: usize) -> Line<'static> {
+fn render_split_row(
+    view: &DiffView,
+    row: &SplitRow,
+    width: usize,
+    palette: &Palette,
+) -> Line<'static> {
     let (old, new) = match row {
         SplitRow::Shared(wrapped) => {
-            return render_row(&view.rows[wrapped.row], wrapped, view.number_width, width);
+            return render_row(
+                &view.rows[wrapped.row],
+                wrapped,
+                view.number_width,
+                width,
+                palette,
+            );
         }
         SplitRow::Pair { old, new } => (old, new),
     };
     let (old_width, new_width) = split_widths(width);
-    let mut spans = render_side(view, *old, true, old_width);
-    spans.push(Span::styled("│", Style::default().fg(BORDER).bg(BG)));
-    spans.extend(render_side(view, *new, false, new_width));
+    let mut spans = render_side(view, *old, true, old_width, palette);
+    spans.push(Span::styled(
+        "│",
+        Style::default().fg(palette.border).bg(palette.bg),
+    ));
+    spans.extend(render_side(view, *new, false, new_width, palette));
     Line::from(spans)
 }
 
@@ -344,17 +372,21 @@ fn render_side(
     wrapped: Option<WrappedRow>,
     old: bool,
     width: usize,
+    palette: &Palette,
 ) -> Vec<Span<'static>> {
     let Some(wrapped) = wrapped else {
-        return vec![Span::styled(" ".repeat(width), Style::default().bg(PANEL))];
+        return vec![Span::styled(
+            " ".repeat(width),
+            Style::default().bg(palette.panel),
+        )];
     };
     let row = &view.rows[wrapped.row];
-    let (marker, foreground, background) = row_theme(row.kind);
+    let (marker, foreground, background) = row_theme(row.kind, palette);
     let base = Style::default()
         .fg(if row.kind == RowKind::Note {
-            MUTED
+            palette.muted
         } else {
-            TEXT
+            palette.text
         })
         .bg(background);
     let number_width = view.number_width.max(1);
@@ -428,6 +460,7 @@ fn operation_details(
     area: Rect,
     details: &mut OperationDetails,
     keymap: Keymap,
+    palette: &Palette,
 ) {
     let width = area.width.saturating_sub(4).min(110);
     let height = area.height.saturating_sub(2).min(28);
@@ -438,14 +471,14 @@ fn operation_details(
         height,
     );
     let (title, color) = match &details.result {
-        None if details.cancelling => ("Cancelling…".into(), ACCENT),
-        None => (format!("{}…", details.label), ACCENT),
-        Some(OperationResult::Success) => (details.success_message.clone(), GREEN),
-        Some(OperationResult::Cancelled) => ("Git operation cancelled".into(), ACCENT),
-        Some(OperationResult::Failed(_)) => ("Git operation failed".into(), RED),
+        None if details.cancelling => ("Cancelling…".into(), palette.accent),
+        None => (format!("{}…", details.label), palette.accent),
+        Some(OperationResult::Success) => (details.success_message.clone(), palette.green),
+        Some(OperationResult::Cancelled) => ("Git operation cancelled".into(), palette.accent),
+        Some(OperationResult::Failed(_)) => ("Git operation failed".into(), palette.red),
     };
-    let block =
-        pane(format!(" {} ", safe_text(&title)), true).border_style(Style::default().fg(color));
+    let block = pane(format!(" {} ", safe_text(&title)), true, palette)
+        .border_style(Style::default().fg(color));
     let inner = block.inner(rect);
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
@@ -475,7 +508,7 @@ fn operation_details(
                 ""
             }
         ))
-        .style(Style::default().fg(MUTED)),
+        .style(Style::default().fg(palette.muted)),
         chunks[0],
     );
     let rows: Vec<Line> = details
@@ -499,7 +532,7 @@ fn operation_details(
             } else {
                 "No output"
             })
-            .style(Style::default().fg(MUTED)),
+            .style(Style::default().fg(palette.muted)),
             chunks[1],
         );
     }
@@ -509,8 +542,8 @@ fn operation_details(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .thumb_style(Style::default().fg(ACCENT))
-                .track_style(Style::default().fg(BORDER)),
+                .thumb_style(Style::default().fg(palette.accent))
+                .track_style(Style::default().fg(palette.border)),
             chunks[1],
             &mut state,
         );
@@ -534,12 +567,13 @@ fn operation_details(
                 " · Esc cancel"
             }
         ))
-        .style(Style::default().fg(ACCENT)),
+        .style(Style::default().fg(palette.accent)),
         chunks[2],
     );
 }
 
 fn worktree_popup(frame: &mut Frame, area: Rect, app: &mut App) {
+    let palette = app.theme().palette();
     let popup = app.worktree_popup.as_mut().unwrap();
     let width = area.width.saturating_sub(4).min(100);
     let height = area
@@ -562,11 +596,16 @@ fn worktree_popup(frame: &mut Frame, area: Rect, app: &mut App) {
         height,
     );
     let block = if popup.removal.is_some() {
-        pane(" Delete worktree ".into(), true)
-            .border_style(Style::default().fg(RED))
+        pane(" Delete worktree ".into(), true, palette)
+            .border_style(Style::default().fg(palette.red))
             .title_bottom(" y delete · Esc cancel ")
     } else {
-        pane(format!(" Worktrees {} ", popup.worktrees.len()), true).title_bottom(format!(
+        pane(
+            format!(" Worktrees {} ", popup.worktrees.len()),
+            true,
+            palette,
+        )
+        .title_bottom(format!(
             " {}/{} select · Enter switch · {} delete · r refresh · Esc close ",
             app.keymap.label(Action::Up),
             app.keymap.label(Action::Down),
@@ -581,7 +620,7 @@ fn worktree_popup(frame: &mut Frame, area: Rect, app: &mut App) {
             Paragraph::new(vec![
                 Line::styled(
                     "Permanently delete this worktree?",
-                    Style::default().fg(RED).bold(),
+                    Style::default().fg(palette.red).bold(),
                 ),
                 Line::raw(""),
                 Line::raw(format!("Branch: {}", safe_text(&worktree.branch))),
@@ -616,15 +655,17 @@ fn worktree_popup(frame: &mut Frame, area: Rect, app: &mut App) {
                 )),
                 Line::styled(
                     format!("  {}", safe_text(&worktree.path.to_string_lossy())),
-                    Style::default().fg(MUTED),
+                    Style::default().fg(palette.muted),
                 ),
             ])
         })
         .collect();
     frame.render_stateful_widget(
-        List::new(items)
-            .highlight_symbol("▸ ")
-            .highlight_style(Style::default().bg(HUNK_BG).add_modifier(Modifier::BOLD)),
+        List::new(items).highlight_symbol("▸ ").highlight_style(
+            Style::default()
+                .bg(palette.hunk_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
         chunks[0],
         &mut popup.list_state,
     );
@@ -632,12 +673,16 @@ fn worktree_popup(frame: &mut Frame, area: Rect, app: &mut App) {
         Paragraph::new(popup.error.as_deref().map(safe_text).unwrap_or_else(|| {
             "* current worktree · Switching does not modify files or the index".into()
         }))
-        .style(Style::default().fg(if popup.error.is_some() { RED } else { MUTED })),
+        .style(Style::default().fg(if popup.error.is_some() {
+            palette.red
+        } else {
+            palette.muted
+        })),
         chunks[1],
     );
 }
 
-fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool) {
+fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool, palette: &Palette) {
     let width = area.width.saturating_sub(4).min(80);
     let height = area.height.saturating_sub(2).min(18);
     let rect = Rect::new(
@@ -646,7 +691,7 @@ fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool) 
         width,
         height,
     );
-    let block = pane(" Commit changes ".into(), true);
+    let block = pane(" Commit changes ".into(), true, palette);
     let inner = block.inner(rect);
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
@@ -681,14 +726,18 @@ fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool) 
         } else {
             "Ctrl+S commit · Enter newline · Esc cancel · Ctrl+U clear"
         })
-        .style(Style::default().fg(ACCENT)),
+        .style(Style::default().fg(palette.accent)),
         chunks[1],
     );
     frame.render_widget(
         Paragraph::new(popup.error.as_deref().map(safe_text).unwrap_or_else(|| {
             "Commits staged changes, or all changes if nothing is staged".into()
         }))
-        .style(Style::default().fg(if popup.error.is_some() { RED } else { MUTED })),
+        .style(Style::default().fg(if popup.error.is_some() {
+            palette.red
+        } else {
+            palette.muted
+        })),
         chunks[2],
     );
     if !busy && chunks[0].width > 0 && chunks[0].height > 0 {
@@ -699,7 +748,7 @@ fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool) 
     }
 }
 
-fn help(frame: &mut Frame, area: Rect, keymap: Keymap) {
+fn help(frame: &mut Frame, area: Rect, keymap: Keymap, palette: &Palette) {
     let width = area.width.saturating_sub(4).min(70);
     let height = area.height.saturating_sub(2).min(30);
     let popup = Rect::new(
@@ -711,7 +760,7 @@ fn help(frame: &mut Frame, area: Rect, keymap: Keymap) {
     let text = vec![
         Line::styled(
             "Live Git diffs with Tree-sitter highlighting",
-            Style::default().fg(ACCENT).bold(),
+            Style::default().fg(palette.accent).bold(),
         ),
         Line::raw(""),
         Line::raw("Tab                 Switch files / diff focus"),
@@ -724,6 +773,7 @@ fn help(frame: &mut Frame, area: Rect, keymap: Keymap) {
             )
         )),
         Line::raw("v                   Toggle unified / side-by-side diff"),
+        Line::raw("t                   Cycle through built-in themes"),
         Line::raw("Space               Stage/unstage file (Files) or hunk (Diff)"),
         Line::raw("c                   Commit changes (message popup)"),
         Line::raw("p / P               Pull (fast-forward only) / push branch"),
@@ -754,24 +804,24 @@ fn help(frame: &mut Frame, area: Rect, keymap: Keymap) {
         Line::raw(""),
         Line::styled(
             "Changes: [ ] unstaged (index → disk), [x] staged (HEAD → index)",
-            Style::default().fg(MUTED),
+            Style::default().fg(palette.muted),
         ),
         Line::styled(
             "Partially staged files have both entries. Renames = delete/add.",
-            Style::default().fg(MUTED),
+            Style::default().fg(palette.muted),
         ),
         Line::styled(
             "On narrow terminals, Tab switches panes.",
-            Style::default().fg(MUTED),
+            Style::default().fg(palette.muted),
         ),
         Line::raw(""),
-        Line::styled("Esc closes help", Style::default().fg(ACCENT)),
+        Line::styled("Esc closes help", Style::default().fg(palette.accent)),
     ];
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(text)
-            .block(pane(format!(" Help — {keymap:?} keys "), true))
-            .style(Style::default().bg(PANEL)),
+            .block(pane(format!(" Help — {keymap:?} keys "), true, palette))
+            .style(Style::default().bg(palette.panel)),
         popup,
     );
 }
@@ -779,6 +829,7 @@ fn help(frame: &mut Frame, area: Rect, keymap: Keymap) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const PALETTE: &Palette = crate::theme::Theme::Default.palette();
     use crate::git::tests::{git, repo};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
@@ -791,6 +842,123 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn every_theme_colors_the_interface_syntax_and_both_diff_modes() {
+        use crate::theme::Theme;
+
+        let (dir, repo) = repo();
+        std::fs::write(
+            dir.path().join("test.rs"),
+            "let label = \"start obsolete_value end\";\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "."]);
+        std::fs::write(
+            dir.path().join("test.rs"),
+            "let label = \"start replacement_value end\";\n",
+        )
+        .unwrap();
+        let mut expected_patches = None;
+        let mut app = App::new(repo).unwrap();
+        for (name, theme) in Theme::ALL {
+            let palette = theme.palette();
+            assert!(!app.selected().unwrap().staged);
+            if let Some(patches) = &expected_patches {
+                assert_eq!(&app.view.patches, patches, "{name}");
+            } else {
+                expected_patches = Some(app.view.patches.clone());
+            }
+            app.focus = Focus::Diff;
+            assert_eq!(app.theme(), theme);
+            for mode in [DiffMode::Unified, DiffMode::SideBySide] {
+                if app.diff_mode != mode {
+                    app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+                }
+                let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer();
+                assert!(screen(&terminal).contains(name));
+                assert!(screen(&terminal).contains("t theme"));
+                assert_eq!(buffer[(1, 0)].fg, palette.bg, "{name}");
+                assert_eq!(buffer[(1, 0)].bg, palette.accent, "{name}");
+                assert_eq!(buffer[(139, 29)].bg, palette.panel, "{name}");
+                for (background, word) in [
+                    (palette.del_word_bg, "obsolete_value"),
+                    (palette.add_word_bg, "replacement_value"),
+                ] {
+                    let highlighted: String = buffer
+                        .content
+                        .iter()
+                        .filter(|cell| cell.bg == background)
+                        .map(|cell| {
+                            assert_eq!(cell.fg, palette.syntax.string, "{name}");
+                            cell.symbol()
+                        })
+                        .collect();
+                    assert_eq!(highlighted, word, "{name}: {mode:?}");
+                }
+                for background in [palette.add_bg, palette.del_bg, palette.hunk_bg] {
+                    assert!(
+                        buffer.content.iter().any(|cell| cell.bg == background),
+                        "{name}"
+                    );
+                }
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        }
+        assert_eq!(app.theme(), Theme::Default);
+    }
+
+    #[test]
+    fn every_theme_colors_popups_and_handles_tiny_terminals() {
+        use crate::theme::Theme;
+
+        let (_dir, repo) = repo();
+        for (name, theme) in Theme::ALL {
+            let mut app = App::with_theme(repo.clone(), theme).unwrap();
+            let palette = theme.palette();
+            for popup in 0..4 {
+                app.show_help = popup == 0;
+                app.commit_popup = (popup == 1).then(CommitPopup::default);
+                app.show_operation_details = popup == 2;
+                if popup == 2 {
+                    app.operation_details =
+                        Some(OperationDetails::new(&crate::git::Operation::Push));
+                }
+                if popup == 3 {
+                    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+                }
+                for (width, height) in [(120, 40), (10, 4), (1, 1)] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                    if width == 120 {
+                        let buffer = terminal.backend().buffer();
+                        let center = &buffer[(width / 2, height / 2)];
+                        let (popup_width, popup_height) = match popup {
+                            0 => (70, 30),
+                            1 => (80, 18),
+                            2 => (110, 28),
+                            _ => (100, 5),
+                        };
+                        let corner =
+                            &buffer[((width - popup_width) / 2, (height - popup_height) / 2)];
+                        assert_eq!(corner.symbol(), "┌", "{name}: popup {popup}");
+                        assert_eq!(corner.fg, palette.accent, "{name}: popup {popup}");
+                        assert_eq!(
+                            center.bg,
+                            if popup == 0 {
+                                palette.panel
+                            } else {
+                                palette.bg
+                            },
+                            "{name}: popup {popup}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -839,9 +1007,9 @@ mod tests {
     #[test]
     fn wrapped_rows_keep_styles_and_only_number_the_first_segment() {
         for (kind, marker, bg) in [
-            (RowKind::Added, '+', ADD_BG),
-            (RowKind::Removed, '-', DEL_BG),
-            (RowKind::Context, ' ', BG),
+            (RowKind::Added, '+', PALETTE.add_bg),
+            (RowKind::Removed, '-', PALETTE.del_bg),
+            (RowKind::Context, ' ', PALETTE.bg),
         ] {
             let mut view = crate::diff::DiffView {
                 rows: vec![DiffRow {
@@ -849,8 +1017,8 @@ mod tests {
                     old_line: Some(1),
                     new_line: Some(1),
                     spans: vec![
-                        Span::styled("abcd", Style::default().fg(RED)),
-                        Span::styled("\u{301}界ef", Style::default().fg(ACCENT)),
+                        Span::styled("abcd", Style::default().fg(PALETTE.red)),
+                        Span::styled("\u{301}界ef", Style::default().fg(PALETTE.accent)),
                     ],
                 }],
                 number_width: 1,
@@ -860,14 +1028,14 @@ mod tests {
             let lines: Vec<_> = view
                 .wrapped_rows
                 .iter()
-                .map(|wrapped| render_row(&view.rows[wrapped.row], wrapped, 1, 13))
+                .map(|wrapped| render_row(&view.rows[wrapped.row], wrapped, 1, 13, PALETTE))
                 .collect();
             assert_eq!(lines.len(), 2);
             assert_eq!(lines[0].to_string(), format!(" 1 1 │ {marker} abcd\u{301}"));
             assert_eq!(lines[1].to_string(), "     │   界ef");
-            assert_eq!(lines[0].spans[1].style.fg, Some(RED));
-            assert_eq!(lines[0].spans[2].style.fg, Some(ACCENT));
-            assert_eq!(lines[1].spans[1].style.fg, Some(ACCENT));
+            assert_eq!(lines[0].spans[1].style.fg, Some(PALETTE.red));
+            assert_eq!(lines[0].spans[2].style.fg, Some(PALETTE.accent));
+            assert_eq!(lines[1].spans[1].style.fg, Some(PALETTE.accent));
             for line in lines {
                 assert_eq!(line.style.bg, Some(bg));
                 assert_eq!(line.width(), 13);
@@ -877,11 +1045,7 @@ mod tests {
 
     #[test]
     fn word_backgrounds_and_syntax_colors_survive_wrapping_and_rendering() {
-        use crate::{
-            diff::DiffView,
-            git::Content,
-            highlight::{ADD_WORD_BG, DEL_WORD_BG, SyntaxHighlighter},
-        };
+        use crate::{diff::DiffView, git::Content, highlight::SyntaxHighlighter};
 
         let mut view = DiffView::build(
             std::path::Path::new("test.rs"),
@@ -896,7 +1060,7 @@ mod tests {
             let lines: Vec<_> = view
                 .wrapped_rows
                 .iter()
-                .map(|wrapped| render_row(&view.rows[wrapped.row], wrapped, 1, width))
+                .map(|wrapped| render_row(&view.rows[wrapped.row], wrapped, 1, width, PALETTE))
                 .collect();
             let mut terminal =
                 Terminal::new(TestBackend::new(width as u16, lines.len() as u16)).unwrap();
@@ -905,15 +1069,15 @@ mod tests {
                 .unwrap();
             let buffer = terminal.backend().buffer();
             for (background, word) in [
-                (DEL_WORD_BG, "obsolete_value"),
-                (ADD_WORD_BG, "replacement_value"),
+                (PALETTE.del_word_bg, "obsolete_value"),
+                (PALETTE.add_word_bg, "replacement_value"),
             ] {
                 let highlighted: String = buffer
                     .content
                     .iter()
                     .filter(|cell| cell.bg == background)
                     .map(|cell| {
-                        assert_eq!(cell.fg, GREEN); // Tree-sitter's string color.
+                        assert_eq!(cell.fg, PALETTE.green); // Tree-sitter's string color.
                         cell.symbol()
                     })
                     .collect();
@@ -922,8 +1086,8 @@ mod tests {
             for (y, wrapped) in view.wrapped_rows.iter().enumerate() {
                 let row = &view.rows[wrapped.row];
                 let background = match row.kind {
-                    RowKind::Added => ADD_BG,
-                    RowKind::Removed => DEL_BG,
+                    RowKind::Added => PALETTE.add_bg,
+                    RowKind::Removed => PALETTE.del_bg,
                     _ => continue,
                 };
                 for x in 0..row.gutter_width(1) {
@@ -936,10 +1100,7 @@ mod tests {
 
     #[test]
     fn split_rendering_preserves_word_backgrounds_gutters_and_column_alignment() {
-        use crate::{
-            git::Content,
-            highlight::{ADD_WORD_BG, DEL_WORD_BG, SyntaxHighlighter},
-        };
+        use crate::{git::Content, highlight::SyntaxHighlighter};
 
         let mut view = DiffView::build(
             std::path::Path::new("test.rs"),
@@ -954,7 +1115,7 @@ mod tests {
                 .split_rows
                 .iter()
                 .map(|row| {
-                    let line = render_split_row(&view, row, width);
+                    let line = render_split_row(&view, row, width, PALETTE);
                     if matches!(row, SplitRow::Pair { .. }) {
                         assert_eq!(line.width(), width);
                     }
@@ -968,15 +1129,15 @@ mod tests {
                 .unwrap();
             let buffer = terminal.backend().buffer();
             for (background, word) in [
-                (DEL_WORD_BG, "obsolete_value"),
-                (ADD_WORD_BG, "replacement_value"),
+                (PALETTE.del_word_bg, "obsolete_value"),
+                (PALETTE.add_word_bg, "replacement_value"),
             ] {
                 let highlighted: String = buffer
                     .content
                     .iter()
                     .filter(|cell| cell.bg == background)
                     .map(|cell| {
-                        assert_eq!(cell.fg, GREEN);
+                        assert_eq!(cell.fg, PALETTE.green);
                         cell.symbol()
                     })
                     .collect();
@@ -988,12 +1149,17 @@ mod tests {
                     continue;
                 };
                 assert_eq!(buffer[(old_width as u16, y as u16)].symbol(), "│");
-                for (start, wrapped, background, marker) in
-                    [(0, old, DEL_BG, '-'), (old_width + 1, new, ADD_BG, '+')]
-                {
+                for (start, wrapped, background, marker) in [
+                    (0, old, PALETTE.del_bg, '-'),
+                    (old_width + 1, new, PALETTE.add_bg, '+'),
+                ] {
                     assert_eq!(
                         buffer[(start as u16, y as u16)].bg,
-                        if wrapped.is_some() { background } else { PANEL }
+                        if wrapped.is_some() {
+                            background
+                        } else {
+                            PALETTE.panel
+                        }
                     );
                     if let Some(wrapped) = wrapped {
                         let gutter: String = (start..start + 5)
@@ -1066,7 +1232,7 @@ mod tests {
         let mut text = String::new();
         for row in &view.split_rows {
             if let SplitRow::Pair { new: Some(new), .. } = row {
-                let spans = render_side(&view, Some(*new), false, split_widths(60).1);
+                let spans = render_side(&view, Some(*new), false, split_widths(60).1, PALETTE);
                 text.extend(
                     spans
                         .iter()

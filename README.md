@@ -6,6 +6,7 @@ Review live Git diffs and stage files or hunks in your terminal.
 - Staged and unstaged diffs in one view, updated as you edit.
 - Stage files or hunks, commit, pull, push, and open files in your editor.
 - Switch between Git worktrees without restarting.
+- Choose from 10 built-in dark and light themes.
 
 ## Getting started
 
@@ -36,7 +37,7 @@ worktrees, editor actions, and troubleshooting.
 
 ## Configuration guide
 
-See the [configuration guide](docs/configuration.md) for keymaps and editor setup.
+See the [configuration guide](docs/configuration.md) for themes, keymaps, and editor setup.
 
 ## Contributing
 

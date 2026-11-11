@@ -70,6 +70,30 @@ fn config_is_loaded_from_xdg_or_home_before_starting_the_ui() {
 }
 
 #[test]
+fn unknown_theme_reports_the_config_path_and_builtin_names_before_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = dir.path().join("diffy");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let path = config_dir.join("config.toml");
+    std::fs::write(&path, "theme = \"custom\"\n").unwrap();
+    let output = diffy()
+        .env("XDG_CONFIG_HOME", dir.path())
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    for expected in [
+        format!("Invalid config in {}", path.display()),
+        "unknown variant `custom`".into(),
+        "`default`".into(),
+        "`github-light`".into(),
+    ] {
+        assert!(error.contains(&expected), "{error}");
+    }
+}
+
+#[test]
 fn invalid_arguments_fail_before_starting_the_ui() {
     for args in [vec!["--invalid"], vec!["first", "second"]] {
         let output = diffy().args(args).output().unwrap();

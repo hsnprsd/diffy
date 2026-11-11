@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     git::Content,
-    highlight::{ADD_WORD_BG, DEL_WORD_BG, Language, SyntaxHighlighter},
+    highlight::{Language, SyntaxHighlighter},
 };
 
 const MAX_LINES: usize = 40_000;
@@ -258,8 +258,9 @@ impl DiffView {
             .diff_lines(&old, &new);
         let (old_emphasis, new_emphasis) =
             word_emphasis(&diff, Instant::now() + Duration::from_millis(100));
-        let old_lines = highlighter.lines(path, &old, &old_emphasis, DEL_WORD_BG)?;
-        let new_lines = highlighter.lines(path, &new, &new_emphasis, ADD_WORD_BG)?;
+        let palette = highlighter.theme().palette();
+        let old_lines = highlighter.lines(path, &old, &old_emphasis, palette.del_word_bg)?;
+        let new_lines = highlighter.lines(path, &new, &new_emphasis, palette.add_word_bg)?;
         let mut view = Self {
             language: Language::detect(path),
             number_width: line_count.max(1).to_string().len(),
@@ -452,7 +453,11 @@ mod tests {
     fn emphasized_text(row: &DiffRow) -> String {
         row.spans
             .iter()
-            .filter(|span| matches!(span.style.bg, Some(ADD_WORD_BG | DEL_WORD_BG)))
+            .filter(|span| {
+                let palette = crate::theme::Theme::default().palette();
+                span.style.bg == Some(palette.add_word_bg)
+                    || span.style.bg == Some(palette.del_word_bg)
+            })
             .map(|span| span.content.as_ref())
             .collect()
     }

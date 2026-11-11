@@ -9,12 +9,13 @@ use std::{
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::keymap::Keymap;
+use crate::{keymap::Keymap, theme::Theme};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub keymap: Keymap,
+    pub theme: Theme,
     pub editor: Option<String>,
 }
 
@@ -81,10 +82,12 @@ mod tests {
         let config = Config::load_from(&path).unwrap();
         assert_eq!(config.keymap, Keymap::Standard);
         assert_eq!(config.editor, None);
+        assert_eq!(config.theme, Theme::Default);
         fs::write(&path, "# Defaults\n").unwrap();
         let config = Config::load_from(&path).unwrap();
         assert_eq!(config.keymap, Keymap::Standard);
         assert_eq!(config.editor, None);
+        assert_eq!(config.theme, Theme::Default);
     }
 
     #[test]
@@ -94,6 +97,23 @@ mod tests {
         for (value, keymap) in [("standard", Keymap::Standard), ("vim", Keymap::Vim)] {
             fs::write(&path, format!("keymap = \"{value}\"\n")).unwrap();
             assert_eq!(Config::load_from(&path).unwrap().keymap, keymap);
+        }
+    }
+
+    #[test]
+    fn config_selects_each_builtin_theme_alongside_keymap_and_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (name, theme) in Theme::ALL {
+            fs::write(
+                &path,
+                format!("theme = {name:?}\nkeymap = \"vim\"\neditor = \"nvim -f\"\n"),
+            )
+            .unwrap();
+            let config = Config::load_from(&path).unwrap();
+            assert_eq!(config.theme, theme, "{name}");
+            assert_eq!(config.keymap, Keymap::Vim);
+            assert_eq!(config.editor.as_deref(), Some("nvim -f"));
         }
     }
 
@@ -118,6 +138,11 @@ mod tests {
             "keymap = \"emacs\"",
             "keymap = 1",
             "editor = 1",
+            "theme = \"custom\"",
+            "theme = 1",
+            "theme = { bg = \"#ffffff\" }",
+            "theme = \"Default\"",
+            "[themes.custom]\nbg = \"#ffffff\"",
             "keymaps = \"vim\"",
         ] {
             fs::write(&path, contents).unwrap();

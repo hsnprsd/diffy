@@ -6,7 +6,8 @@
 
 Diffy reads `$XDG_CONFIG_HOME/diffy/config.toml`, falling back to
 `~/.config/diffy/config.toml` when `XDG_CONFIG_HOME` is unset, empty, or relative.
-A missing config file uses the defaults: the standard keymap and `$EDITOR`.
+A missing config file uses the defaults: the standard keymap, the `default` theme,
+and `$EDITOR`.
 
 ## Keymap
 
@@ -25,6 +26,49 @@ the active preset's shortcuts; the preset stays active when reviewing another
 worktree.
 
 See the [keyboard reference](usage.md#keyboard-shortcuts) for both presets.
+
+## Theme
+
+Press **`t`** from either pane to cycle through the 10 built-in themes immediately.
+The header shows the active theme's name. The choice lasts for the session and
+stays active when switching worktrees; it does not rewrite your config file.
+
+Set `theme` in the config file to choose the startup palette:
+
+```toml
+theme = "catppuccin-mocha"
+```
+
+The 10 built-in themes are:
+
+| Value | Appearance |
+| --- | --- |
+| `default` | Dark; preserves diffy's original colors |
+| `tokyo-night` | Dark |
+| `dracula` | Dark |
+| `nord` | Dark |
+| `gruvbox` | Dark |
+| `catppuccin-mocha` | Dark |
+| `one-dark` | Dark |
+| `solarized-dark` | Dark |
+| `solarized-light` | Light |
+| `github-light` | Light |
+
+Themes apply to the entire interface, syntax highlighting, and line- and
+word-level diff backgrounds in both diff layouts. The selected theme stays active
+when switching worktrees. Restart diffy to apply a configuration-file change, or
+use `t` to switch themes without restarting.
+
+Names are case-sensitive. Unknown names report an error with the config path
+before the terminal UI starts. Custom themes and color overrides are not supported.
+
+Theme, keymap, and editor settings can be combined:
+
+```toml
+theme = "github-light"
+keymap = "vim"
+editor = "nvim"
+```
 
 ## Editor
 

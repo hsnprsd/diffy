@@ -8,11 +8,8 @@ use ratatui::{
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 use unicode_width::UnicodeWidthChar;
 
-use crate::git::safe_text;
+use crate::{git::safe_text, theme::Theme};
 
-pub const TEXT: Color = Color::Rgb(212, 212, 212);
-pub const ADD_WORD_BG: Color = Color::Rgb(24, 70, 32);
-pub const DEL_WORD_BG: Color = Color::Rgb(84, 24, 30);
 const CAPTURES: &[&str] = &[
     "attribute",
     "boolean",
@@ -33,27 +30,6 @@ const CAPTURES: &[&str] = &[
     "type",
     "variable",
     "variable.builtin",
-];
-const COLORS: &[Color] = &[
-    Color::Rgb(229, 192, 123),
-    Color::Rgb(255, 158, 100),
-    Color::Rgb(115, 130, 155),
-    Color::Rgb(255, 158, 100),
-    Color::Rgb(125, 207, 255),
-    TEXT,
-    Color::Rgb(187, 154, 247),
-    Color::Rgb(122, 162, 247),
-    Color::Rgb(187, 154, 247),
-    Color::Rgb(224, 175, 104),
-    Color::Rgb(255, 158, 100),
-    Color::Rgb(137, 221, 255),
-    Color::Rgb(125, 207, 255),
-    Color::Rgb(169, 177, 214),
-    Color::Rgb(158, 206, 106),
-    Color::Rgb(247, 118, 142),
-    Color::Rgb(125, 207, 255),
-    TEXT,
-    Color::Rgb(247, 118, 142),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -179,11 +155,23 @@ impl Language {
 
 #[derive(Default)]
 pub struct SyntaxHighlighter {
+    theme: Theme,
     configs: HashMap<Language, HighlightConfiguration>,
     engine: Highlighter,
 }
 
 impl SyntaxHighlighter {
+    pub fn new(theme: Theme) -> Self {
+        Self {
+            theme,
+            ..Self::default()
+        }
+    }
+
+    pub fn theme(&self) -> Theme {
+        self.theme
+    }
+
     /// Parse complete revisions, not isolated diff lines, to preserve multiline scopes.
     /// Emphasis ranges are sorted, non-overlapping byte ranges in the original source.
     pub fn lines(
@@ -193,9 +181,11 @@ impl SyntaxHighlighter {
         emphasis: &[Range<usize>],
         emphasis_background: Color,
     ) -> Result<Vec<Vec<Span<'static>>>> {
+        let palette = self.theme.palette();
+        let colors = palette.syntax_colors();
         let mut builder = LineBuilder::new(source, emphasis, emphasis_background);
         let Some(language) = Language::detect(path) else {
-            builder.source(0, source.len(), TEXT);
+            builder.source(0, source.len(), palette.text);
             return Ok(builder.finish());
         };
         if let std::collections::hash_map::Entry::Vacant(entry) = self.configs.entry(language) {
@@ -207,12 +197,12 @@ impl SyntaxHighlighter {
         let mut stack = Vec::new();
         for event in events {
             match event? {
-                HighlightEvent::HighlightStart(highlight) => stack.push(COLORS[highlight.0]),
+                HighlightEvent::HighlightStart(highlight) => stack.push(colors[highlight.0]),
                 HighlightEvent::HighlightEnd => {
                     stack.pop();
                 }
                 HighlightEvent::Source { start, end } => {
-                    builder.source(start, end, stack.last().copied().unwrap_or(TEXT));
+                    builder.source(start, end, stack.last().copied().unwrap_or(palette.text));
                 }
             }
         }
@@ -313,6 +303,7 @@ impl<'a> LineBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const PALETTE: &crate::theme::Palette = Theme::Default.palette();
 
     #[test]
     fn every_grammar_and_query_compiles() {
@@ -342,8 +333,53 @@ mod tests {
             .lines(Path::new("test.rs"), source, &[], Color::Reset)
             .unwrap();
         assert_eq!(lines.len(), 4);
-        assert!(lines[1].iter().all(|span| span.style.fg == Some(COLORS[2])));
-        assert!(lines[3].iter().any(|span| span.style.fg == Some(COLORS[8])));
+        assert!(
+            lines[1]
+                .iter()
+                .all(|span| span.style.fg == Some(PALETTE.syntax.comment))
+        );
+        assert!(
+            lines[3]
+                .iter()
+                .any(|span| span.style.fg == Some(PALETTE.syntax.keyword))
+        );
+    }
+
+    #[test]
+    fn every_theme_colors_plain_text_and_syntax_captures() {
+        for (name, theme) in Theme::ALL {
+            let palette = theme.palette();
+            let mut highlighter = SyntaxHighlighter::new(theme);
+            let plain = highlighter
+                .lines(Path::new("test.txt"), "plain text\n", &[], Color::Reset)
+                .unwrap();
+            assert_eq!(plain[0][0].style.fg, Some(palette.text), "{name}");
+
+            let lines = highlighter
+                .lines(
+                    Path::new("test.rs"),
+                    "// comment\nlet value = 42;\n",
+                    &[],
+                    Color::Reset,
+                )
+                .unwrap();
+            assert!(
+                lines[0]
+                    .iter()
+                    .all(|span| span.style.fg == Some(palette.syntax.comment)),
+                "{name}"
+            );
+            for (token, color) in [
+                ("let", palette.syntax.keyword),
+                ("42", palette.syntax.number),
+            ] {
+                let span = lines[1]
+                    .iter()
+                    .find(|span| span.content.contains(token))
+                    .unwrap();
+                assert_eq!(span.style.fg, Some(color), "{name}: {token}");
+            }
+        }
     }
 
     #[test]
@@ -353,7 +389,7 @@ mod tests {
                 Path::new("test.txt"),
                 "a\t界\x1b\r\nb\té\n",
                 &[1..6, 9..12],
-                ADD_WORD_BG,
+                PALETTE.add_word_bg,
             )
             .unwrap();
         let text = |line: &[Span<'_>], background: Option<Color>| {
@@ -363,14 +399,14 @@ mod tests {
                 .collect::<String>()
         };
         assert_eq!(text(&lines[0], None), "a");
-        assert_eq!(text(&lines[0], Some(ADD_WORD_BG)), "   界\\u{1b}");
+        assert_eq!(text(&lines[0], Some(PALETTE.add_word_bg)), "   界\\u{1b}");
         assert_eq!(text(&lines[1], None), "b");
-        assert_eq!(text(&lines[1], Some(ADD_WORD_BG)), "   é");
+        assert_eq!(text(&lines[1], Some(PALETTE.add_word_bg)), "   é");
         assert!(
             lines
                 .iter()
                 .flatten()
-                .all(|span| span.style.fg == Some(TEXT))
+                .all(|span| span.style.fg == Some(PALETTE.text))
         );
     }
 
@@ -386,7 +422,7 @@ mod tests {
                 Path::new("test.rs"),
                 source,
                 std::slice::from_ref(&(0..14)),
-                ADD_WORD_BG,
+                PALETTE.add_word_bg,
             )
             .unwrap();
         let characters = |lines: Vec<Vec<Span<'_>>>| {
@@ -407,7 +443,15 @@ mod tests {
         for (index, ((ch, fg, _), emphasized)) in plain.into_iter().zip(emphasized).enumerate() {
             assert_eq!(
                 emphasized,
-                (ch, fg, if index < 14 { Some(ADD_WORD_BG) } else { None })
+                (
+                    ch,
+                    fg,
+                    if index < 14 {
+                        Some(PALETTE.add_word_bg)
+                    } else {
+                        None
+                    }
+                )
             );
         }
     }

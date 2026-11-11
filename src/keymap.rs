@@ -36,9 +36,10 @@ pub enum Action {
     NextHunk,
     PreviousHunk,
     ToggleView,
+    NextTheme,
 }
 
-const ACTIONS: [Action; 25] = [
+const ACTIONS: [Action; 26] = [
     Action::Down,
     Action::Up,
     Action::PageDown,
@@ -64,6 +65,7 @@ const ACTIONS: [Action; 25] = [
     Action::NextHunk,
     Action::PreviousHunk,
     Action::ToggleView,
+    Action::NextTheme,
 ];
 
 // Some terminals report Shift for uppercase letters and punctuation, others only
@@ -132,6 +134,7 @@ impl Keymap {
             (_, NextHunk) => (Char(']'), "]"),
             (_, PreviousHunk) => (Char('['), "["),
             (_, ToggleView) => (Char('v'), "v"),
+            (_, NextTheme) => (Char('t'), "t"),
         }
     }
 }

@@ -6,6 +6,7 @@ mod git;
 mod highlight;
 mod keymap;
 mod operation;
+mod theme;
 mod ui;
 mod watch;
 
@@ -38,12 +39,13 @@ fn main() -> Result<()> {
                  Standard keys: Tab focus · ↑/↓ move\n\
                        Space stage/unstage file or hunk · c commit · p pull · P push\n\
                        w worktrees · e open editor · [/] hunks · ? help · q quit\n\
-                       v toggle unified / side-by-side diff\n\n\
+                       v toggle unified / side-by-side diff · t next theme\n\n\
                  Git output opens automatically: ↑/↓ or PgUp/PgDn scroll · Esc cancel running / close completed.\n\
                  Commit popup: Ctrl+S commit · Enter newline · Esc cancel.\n\
                  Worktree picker: Enter switch · Delete delete · r refresh · Esc close.\n\
                  Config: $XDG_CONFIG_HOME/diffy/config.toml (default ~/.config/diffy/config.toml).\n\
                  Set keymap = \"vim\" for Vim-style keys; the default is \"standard\".\n\
+                 Set theme = \"dracula\" to select one of 10 built-in themes.\n\
                  Set editor = \"nvim\" to override $EDITOR.\n\
                  Pull is fast-forward only. Staging/unstaging never changes working-tree files."
             );
@@ -68,7 +70,7 @@ fn main() -> Result<()> {
         bail!("An interactive terminal is required. See diffy --help");
     }
     let mut watcher = Watcher::new(&repo).context("Could not watch repository")?;
-    let mut app = App::new(repo)?;
+    let mut app = App::with_theme(repo, config.theme)?;
     app.keymap = config.keymap;
 
     // Ratatui's panic hook and this guard both restore the terminal on exit.
@@ -122,7 +124,7 @@ fn switch_worktree(path: &Path, app: &mut App, watcher: &mut Watcher) -> Result<
     );
     // Prepare both before replacing either: failures leave the old view and watcher usable.
     let next_watcher = Watcher::new(&repo).context("Could not watch worktree")?;
-    let mut next_app = App::new(repo)?;
+    let mut next_app = App::with_theme(repo, app.theme())?;
     next_app.focus = app.focus;
     next_app.set_diff_mode(app.diff_mode);
     next_app.keymap = app.keymap;
@@ -217,7 +219,10 @@ mod tests {
         let linked_index = fs::read(linked_repo.git_dir.join("index")).unwrap();
         let main_head = fs::read(repo.git_dir.join("refs/heads/main")).unwrap();
         let mut watcher = Watcher::new(&repo).unwrap();
-        let mut app = App::new(repo.clone()).unwrap();
+        let theme = theme::Theme::GithubLight;
+        let mut app = App::with_theme(repo.clone(), theme::Theme::SolarizedLight).unwrap();
+        key(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.theme(), theme);
         app.focus = Focus::Diff;
         app.keymap = keymap::Keymap::Vim;
         app.set_diff_mode(DiffMode::SideBySide);
@@ -232,6 +237,18 @@ mod tests {
         assert_eq!(app.repo.git_dir, linked_repo.git_dir);
         assert_eq!(app.branch, "linked");
         assert_eq!(app.keymap, keymap::Keymap::Vim);
+        assert_eq!(app.theme(), theme);
+        assert!(
+            app.view
+                .rows
+                .iter()
+                .filter(|row| matches!(
+                    row.kind,
+                    crate::diff::RowKind::Added | crate::diff::RowKind::Removed
+                ))
+                .flat_map(|row| &row.spans)
+                .all(|span| span.style.fg == Some(theme.palette().text))
+        );
         assert_eq!(app.diff_mode, DiffMode::SideBySide);
         assert!(!app.view.split_rows.is_empty());
         assert!(app.focus == Focus::Diff);

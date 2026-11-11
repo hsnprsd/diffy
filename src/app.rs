@@ -11,6 +11,7 @@ use crate::{
     highlight::SyntaxHighlighter,
     keymap::{self, Action, Keymap},
     operation::{self, OperationDetails, OperationEvent, OperationHandle, OperationResult},
+    theme::Theme,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,7 +155,36 @@ pub struct App {
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(repo: Repository) -> Result<Self> {
+        Self::with_theme(repo, Theme::default())
+    }
+
+    pub fn theme(&self) -> Theme {
+        self.highlighter.theme()
+    }
+
+    fn cycle_theme(&mut self) -> Result<()> {
+        let mut highlighter = SyntaxHighlighter::new(self.theme().next());
+        // Recolor the displayed snapshot without rereading or modifying the repository.
+        if let Some(entry) = self.selected()
+            && let Some((old, new)) = &self.view.source
+        {
+            let mut view = DiffView::build(
+                &entry.path,
+                Content::Text(old.clone()),
+                Content::Text(new.clone()),
+                &mut highlighter,
+            )?;
+            view.layout(self.viewport_width, self.diff_mode);
+            self.view = view;
+            self.clamp_scroll();
+        }
+        self.highlighter = highlighter;
+        Ok(())
+    }
+
+    pub fn with_theme(repo: Repository, theme: Theme) -> Result<Self> {
         let branch = repo.branch()?;
         let files = repo.files()?;
         let mut app = Self {
@@ -179,7 +209,7 @@ impl App {
             show_help: false,
             error: None,
             edit_request: None,
-            highlighter: SyntaxHighlighter::default(),
+            highlighter: SyntaxHighlighter::new(theme),
         };
         app.list_state.select((!app.files.is_empty()).then_some(0));
         app.load_selected();
@@ -773,6 +803,11 @@ impl App {
             }
             Some(Action::Edit) => self.request_edit(),
             Some(Action::ToggleView) => self.set_diff_mode(self.diff_mode.toggle()),
+            Some(Action::NextTheme) => {
+                if let Err(error) = self.cycle_theme() {
+                    self.error = Some(format!("Theme: {error:#}"));
+                }
+            }
             Some(Action::Help) => self.show_help = true,
             Some(Action::Focus) => {
                 self.focus = if self.focus == Focus::Files {
@@ -993,6 +1028,92 @@ mod tests {
         }
         std::fs::write(dir.path().join("a file.txt"), new).unwrap();
         (dir, App::new(repo).unwrap())
+    }
+
+    #[test]
+    fn theme_shortcut_cycles_and_preserves_the_review_and_repository() {
+        for keymap in [Keymap::Standard, Keymap::Vim] {
+            for mode in [DiffMode::Unified, DiffMode::SideBySide] {
+                let (dir, mut app) = app_with_hunks();
+                app.keymap = keymap;
+                app.set_diff_mode(mode);
+                app.focus = Focus::Diff;
+                app.resize_diff(80, 4);
+                app.handle_key(key(']'));
+                let scroll = app.scroll;
+                let selected = app.list_state.selected();
+                let source = app.view.source.clone();
+                let patches = app.view.patches.clone();
+                let path = dir.path().join("a file.txt");
+                let contents = std::fs::read(&path).unwrap();
+                let index = std::fs::read(app.repo.git_dir.join("index")).unwrap();
+                app.status = Some(Status::Success("Previous operation result".into()));
+                for (_, theme) in Theme::ALL.iter().cycle().skip(1).take(Theme::ALL.len()) {
+                    assert!(!app.handle_key(key('t')));
+                    assert_eq!(app.theme(), *theme);
+                    assert_eq!(app.scroll, scroll);
+                    assert_eq!(app.list_state.selected(), selected);
+                    assert!(app.focus == Focus::Diff);
+                    assert_eq!(app.diff_mode, mode);
+                    assert_eq!(app.view.source, source);
+                    assert_eq!(app.view.patches, patches);
+                    assert_eq!(
+                        app.status.as_ref().unwrap().message(),
+                        "Previous operation result"
+                    );
+                }
+                assert_eq!(app.theme(), Theme::Default);
+                assert_eq!(std::fs::read(&path).unwrap(), contents);
+                assert_eq!(
+                    std::fs::read(app.repo.git_dir.join("index")).unwrap(),
+                    index
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn theme_changes_keep_the_displayed_snapshot_until_refresh() {
+        let (dir, mut app) = app_with_hunks();
+        let source = app.view.source.clone();
+        std::fs::write(dir.path().join("a file.txt"), "newer edits\n").unwrap();
+        app.handle_key(key('t'));
+        assert_eq!(app.theme(), Theme::TokyoNight);
+        assert_eq!(app.view.source, source);
+        app.refresh();
+        assert_eq!(app.theme(), Theme::TokyoNight);
+        assert_eq!(app.view.source.as_ref().unwrap().1, "newer edits\n");
+        assert!(
+            app.view
+                .rows
+                .iter()
+                .filter(|row| row.kind == crate::diff::RowKind::Added)
+                .flat_map(|row| &row.spans)
+                .all(|span| span.style.fg == Some(Theme::TokyoNight.palette().text))
+        );
+    }
+
+    #[test]
+    fn theme_shortcut_respects_modal_input_and_works_without_changes() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo).unwrap();
+        app.handle_key(key('t'));
+        assert_eq!(app.theme(), Theme::TokyoNight);
+        app.handle_key(key('?'));
+        app.handle_key(key('t'));
+        assert_eq!(app.theme(), Theme::TokyoNight);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.commit_popup = Some(CommitPopup::default());
+        app.handle_key(key('t'));
+        assert_eq!(app.commit_popup.as_ref().unwrap().message, "t");
+        assert_eq!(app.theme(), Theme::TokyoNight);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(key('w'));
+        app.handle_key(key('t'));
+        assert_eq!(app.theme(), Theme::TokyoNight);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(key('t'));
+        assert_eq!(app.theme(), Theme::Dracula);
     }
 
     #[test]

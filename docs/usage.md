@@ -52,6 +52,7 @@ These shortcuts are shared by both presets:
 | Key | Action |
 | --- | --- |
 | `v` | Toggle unified (inline) / side-by-side diff |
+| `t` | Cycle through the 10 built-in themes (active name appears in the header) |
 | `Space` | Stage an unstaged entry / unstage a staged entry: whole file in Files, first visible hunk in Diff |
 | `w` | Choose a worktree to review |
 | `c` | Open the commit-message popup (staged changes, or all changes if nothing is staged) |
@@ -79,6 +80,11 @@ markers appear only on the first screen row of each source line. Scrolling and
 paging move through screen rows, including wrapped continuations.
 
 Below 80 columns, only the focused pane is shown; `Tab` switches panes.
+
+Press `t` from either pane to change themes immediately, including syntax and diff
+colors. Cycling wraps from the last theme to the first. The choice stays active
+for the session, including worktree switches; the next launch uses your configured
+startup theme. See [themes](configuration.md#theme) for the list and setup.
 
 ## Toggle diff layouts
 
