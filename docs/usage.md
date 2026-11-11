@@ -83,7 +83,8 @@ The footer shows a few actions for the focused pane: staging the selected file
 or hunk, switching panes, and help. Wider footers also show commit (Files) or
 hunk navigation (Diff). Press `?` for the full shortcut reference.
 
-Below 80 columns, only the focused pane is shown; `Tab` switches panes.
+The focused pane has a heavier, accent-colored border and a bold title. Below
+80 columns, only the focused pane is shown; `Tab` switches panes.
 
 Press `t` from either pane to change themes immediately, including syntax and diff
 colors. Cycling wraps from the last theme to the first. The choice stays active
@@ -173,8 +174,10 @@ when its staging state changes.
   additions, deletions, binary files, and mode changes.
 - In the **Diff pane**, `Space` acts only on the hunk containing the top visible
   row, even when its header is offscreen. Use **`[` / `]`** to select a hunk; the
-  diff summary shows the active hunk number. Every hunk can be brought to the top,
-  even when multiple hunks fit in the viewport.
+  diff summary labels the target explicitly (for example, `Space stage hunk 2/3`)
+  while Diff is focused. A `▸` in the left gutter marks that hunk's first visible
+  row, including when its header is offscreen. Every hunk can be brought to the
+  top, even when multiple hunks fit in the viewport.
 - Hunk staging for modified files uses exactly the displayed text. If the file or
   index changes before the live refresh, the operation is rejected rather than
   acting on an outdated hunk. Added/deleted files have a single hunk covering all

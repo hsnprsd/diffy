@@ -4,8 +4,8 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Wrap,
+        Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -153,7 +153,17 @@ fn footer_hints(app: &App, width: usize) -> String {
 fn pane(title: String, focused: bool, palette: &Palette) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
+        .border_type(if focused {
+            BorderType::Thick
+        } else {
+            BorderType::Plain
+        })
         .title(title)
+        .title_style(if focused {
+            Style::default().bold()
+        } else {
+            Style::default()
+        })
         .border_style(Style::default().fg(if focused {
             palette.accent
         } else {
@@ -168,12 +178,7 @@ fn files(frame: &mut Frame, app: &mut App, area: Rect) {
         format!(" Files {} ", app.files.len()),
         app.focus == Focus::Files,
         palette,
-    )
-    .title_bottom(if app.selected().is_some_and(|entry| entry.staged) {
-        " Space unstage file "
-    } else {
-        " Space stage file "
-    });
+    );
     let inner = block.inner(area);
     let items: Vec<ListItem> = app
         .files
@@ -200,14 +205,15 @@ fn files(frame: &mut Frame, app: &mut App, area: Rect) {
             ListItem::new(Line::from(spans))
         })
         .collect();
+    let selection = if app.focus == Focus::Files {
+        Style::default().bg(palette.hunk_bg).bold()
+    } else {
+        Style::default().bg(palette.panel)
+    };
     let list = List::new(items)
         .block(block)
         .highlight_symbol("▸ ")
-        .highlight_style(
-            Style::default()
-                .bg(palette.hunk_bg)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(selection);
     frame.render_stateful_widget(list, area, &mut app.list_state);
     if app.files.is_empty() {
         frame.render_widget(
@@ -237,7 +243,7 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         mode.name()
     };
-    let block = block.title(format!(" {mode_label} · {title} "));
+    let block = block.title(format!(" Diff · {mode_label} · {title} "));
     let header_height = u16::from(mode == DiffMode::SideBySide).min(inner.height);
     let content = Rect::new(
         inner.x,
@@ -247,9 +253,18 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     app.resize_diff(content.width as usize, content.height as usize);
     let language = app.view.language.map_or("Text", |language| language.name());
-    let mut summary = Line::from(vec![
+    let target = if app.focus == Focus::Diff && !app.view.patches.is_empty() {
+        if app.selected().is_some_and(|entry| entry.staged) {
+            "Space unstage hunk"
+        } else {
+            "Space stage hunk"
+        }
+    } else {
+        "Hunk"
+    };
+    let summary = Line::from(vec![
         Span::raw(format!(
-            " {language} · hunk {}/{}  ",
+            " {target} {}/{} · {language} · ",
             if app.view.hunks.is_empty() {
                 0
             } else {
@@ -267,14 +282,6 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(palette.red),
         ),
     ]);
-    summary.spans.push(Span::styled(
-        if app.selected().is_some_and(|entry| entry.staged) {
-            "· Space unstage hunk "
-        } else {
-            "· Space stage hunk "
-        },
-        Style::default().fg(palette.muted),
-    ));
     frame.render_widget(block.title_bottom(summary), area);
     if mode == DiffMode::SideBySide {
         let (old_width, new_width) = split_widths(inner.width as usize);
@@ -316,6 +323,15 @@ fn diff(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     frame.render_widget(Paragraph::new(rows), content);
+    if app.focus == Focus::Diff && !app.view.patches.is_empty() && content.width > 0 {
+        // Keep the target visible even when its hunk header has scrolled offscreen.
+        let row = app.view.wrapped_hunks[app.active_hunk()].max(app.scroll) - app.scroll;
+        if row < content.height as usize {
+            frame.buffer_mut()[(content.x, content.y + row as u16)]
+                .set_symbol("▸")
+                .set_style(Style::default().fg(palette.accent).bold());
+        }
+    }
     if app.view.wrapped_rows.len() > content.height as usize && area.width > 1 {
         let mut state = ScrollbarState::new(app.view.wrapped_rows.len())
             .position(app.scroll)
@@ -979,7 +995,7 @@ mod tests {
                         };
                         let corner =
                             &buffer[((width - popup_width) / 2, (height - popup_height) / 2)];
-                        assert_eq!(corner.symbol(), "┌", "{name}: popup {popup}");
+                        assert_eq!(corner.symbol(), "┏", "{name}: popup {popup}");
                         assert_eq!(corner.fg, palette.accent, "{name}: popup {popup}");
                         assert_eq!(
                             center.bg,
@@ -1341,6 +1357,64 @@ mod tests {
     }
 
     #[test]
+    fn focused_borders_and_markers_identify_the_active_hunk_in_both_layouts() {
+        let (dir, repo) = repo();
+        let lines: Vec<_> = (0..80).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(dir.path().join("file.txt"), lines.concat()).unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "Initial"]);
+        let mut changed = lines.clone();
+        for index in [3, 30, 60] {
+            changed[index] = format!("changed {index}\n");
+        }
+        std::fs::write(dir.path().join("file.txt"), changed.concat()).unwrap();
+        let mut app = App::new(repo).unwrap();
+        for mode in [DiffMode::Unified, DiffMode::SideBySide] {
+            app.set_diff_mode(mode);
+            for width in [60, 120, 160] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+                app.focus = Focus::Files;
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer();
+                assert_eq!(buffer[(0, 1)].symbol(), "┏");
+                assert_eq!(buffer[(0, 1)].fg, PALETTE.accent);
+                let diff_x = if width >= 80 {
+                    (width / 4).clamp(24, 42)
+                } else {
+                    0
+                };
+                if width >= 80 {
+                    assert_eq!(buffer[(diff_x, 1)].symbol(), "┌");
+                    assert_eq!(buffer[(diff_x, 1)].fg, PALETTE.border);
+                }
+                app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+                app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE));
+                for header_visible in [true, false] {
+                    if !header_visible {
+                        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+                    }
+                    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                    assert_eq!(app.active_hunk(), 1);
+                    assert!(screen(&terminal).contains("Space stage hunk 2/3"));
+                    let buffer = terminal.backend().buffer();
+                    assert_eq!(buffer[(diff_x, 1)].symbol(), "┏");
+                    assert_eq!(buffer[(diff_x, 1)].fg, PALETTE.accent);
+                    let y =
+                        2 + u16::from(mode.effective(app.viewport_width) == DiffMode::SideBySide);
+                    assert_eq!(buffer[(diff_x + 1, y)].symbol(), "▸");
+                    assert_eq!(buffer[(diff_x + 1, y)].fg, PALETTE.accent);
+                    if width >= 80 {
+                        assert_eq!(buffer[(0, 1)].symbol(), "┌");
+                        assert_eq!(buffer[(0, 1)].fg, PALETTE.border);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn footer_hints_follow_focus_staging_state_and_available_width() {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("file.txt"), "new\n").unwrap();
@@ -1402,7 +1476,10 @@ mod tests {
         let text = screen(&terminal);
         assert!(text.contains("Space unstage file"));
         assert!(text.contains("file.txt · Staged"));
-        assert!(text.contains("Space unstage hunk"));
+        assert!(text.contains("Hunk 1/1"));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("Space unstage hunk 1/1"));
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         app.handle_paste("Commit 界\n\nMessage body");
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
