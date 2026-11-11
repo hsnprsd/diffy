@@ -15,6 +15,7 @@ use crate::{
     diff::{DiffMode, DiffRow, DiffView, RowKind, SplitRow, WrappedRow, split_widths},
     git::safe_text,
     highlight::TEXT,
+    keymap::{Action, Keymap},
     operation::{OperationDetails, OperationResult},
 };
 
@@ -109,12 +110,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         commit_popup(frame, area, popup, app.operation_label().is_some());
     }
     if app.show_help {
-        help(frame, area);
+        help(frame, area, app.keymap);
     }
     if app.show_operation_details
         && let Some(details) = &mut app.operation_details
     {
-        operation_details(frame, area, details);
+        operation_details(frame, area, details, app.keymap);
     }
 }
 
@@ -422,7 +423,12 @@ fn clip_spans(spans: &[Span<'_>], offset: usize, width: usize) -> Vec<Span<'stat
     result
 }
 
-fn operation_details(frame: &mut Frame, area: Rect, details: &mut OperationDetails) {
+fn operation_details(
+    frame: &mut Frame,
+    area: Rect,
+    details: &mut OperationDetails,
+    keymap: Keymap,
+) {
     let width = area.width.saturating_sub(4).min(110);
     let height = area.height.saturating_sub(2).min(28);
     let rect = Rect::new(
@@ -511,7 +517,15 @@ fn operation_details(frame: &mut Frame, area: Rect, details: &mut OperationDetai
     }
     frame.render_widget(
         Paragraph::new(format!(
-            "↑/↓ scroll · PgUp/PgDn page · Home/End · h/l horizontal{}",
+            "{}/{} scroll · {}/{} page · {}/{} · {}/{} horizontal{}",
+            keymap.label(Action::Up),
+            keymap.label(Action::Down),
+            keymap.label(Action::PageUp),
+            keymap.label(Action::PageDown),
+            keymap.label(Action::First),
+            keymap.label(Action::Last),
+            keymap.label(Action::Left),
+            keymap.label(Action::Right),
             if details.result.is_some() {
                 " · Esc close"
             } else if details.cancelling {
@@ -550,10 +564,14 @@ fn worktree_popup(frame: &mut Frame, area: Rect, app: &mut App) {
     let block = if popup.removal.is_some() {
         pane(" Delete worktree ".into(), true)
             .border_style(Style::default().fg(RED))
-            .title_bottom(" y delete · n / Esc cancel ")
+            .title_bottom(" y delete · Esc cancel ")
     } else {
-        pane(format!(" Worktrees {} ", popup.worktrees.len()), true)
-            .title_bottom(" ↑/↓ select · Enter switch · D/Del delete · r refresh · Esc close ")
+        pane(format!(" Worktrees {} ", popup.worktrees.len()), true).title_bottom(format!(
+            " {}/{} select · Enter switch · {} delete · r refresh · Esc close ",
+            app.keymap.label(Action::Up),
+            app.keymap.label(Action::Down),
+            app.keymap.label(Action::DeleteWorktree),
+        ))
     };
     let inner = block.inner(rect);
     frame.render_widget(Clear, rect);
@@ -681,7 +699,7 @@ fn commit_popup(frame: &mut Frame, area: Rect, popup: &CommitPopup, busy: bool) 
     }
 }
 
-fn help(frame: &mut Frame, area: Rect) {
+fn help(frame: &mut Frame, area: Rect, keymap: Keymap) {
     let width = area.width.saturating_sub(4).min(70);
     let height = area.height.saturating_sub(2).min(30);
     let popup = Rect::new(
@@ -696,20 +714,43 @@ fn help(frame: &mut Frame, area: Rect) {
             Style::default().fg(ACCENT).bold(),
         ),
         Line::raw(""),
-        Line::raw("←/→ or Tab          Switch files / diff focus"),
-        Line::raw("j/k or ↑/↓          Select files / scroll diff"),
+        Line::raw("Tab                 Switch files / diff focus"),
+        Line::raw(format!(
+            "{:<20}Select files / scroll diff",
+            format!(
+                "{}/{}",
+                keymap.label(Action::Down),
+                keymap.label(Action::Up)
+            )
+        )),
         Line::raw("v                   Toggle unified / side-by-side diff"),
-        Line::raw("Enter               Focus the diff"),
         Line::raw("Space               Stage/unstage file (Files) or hunk (Diff)"),
         Line::raw("c                   Commit changes (message popup)"),
         Line::raw("p / P               Pull (fast-forward only) / push branch"),
         Line::raw("e                   Edit in $EDITOR at first (visible) hunk"),
-        Line::raw("w                   Choose a worktree (D/Del deletes it)"),
-        Line::raw("PgUp/PgDn or u/d    Page up / down"),
-        Line::raw("Home/End or g/G     First / last row or file"),
+        Line::raw(format!(
+            "w                   Choose a worktree ({} deletes it)",
+            keymap.label(Action::DeleteWorktree)
+        )),
+        Line::raw(format!(
+            "{:<20}Page up / down",
+            format!(
+                "{}/{}",
+                keymap.label(Action::PageUp),
+                keymap.label(Action::PageDown)
+            )
+        )),
+        Line::raw(format!(
+            "{:<20}First / last row or file",
+            format!(
+                "{}/{}",
+                keymap.label(Action::First),
+                keymap.label(Action::Last)
+            )
+        )),
         Line::raw("[ / ]               Previous / next hunk"),
-        Line::raw("? / F1              Show help"),
-        Line::raw("q / Ctrl+C          Quit"),
+        Line::raw("?                   Show help"),
+        Line::raw("q                   Quit"),
         Line::raw(""),
         Line::styled(
             "Changes: [ ] unstaged (index → disk), [x] staged (HEAD → index)",
@@ -720,16 +761,16 @@ fn help(frame: &mut Frame, area: Rect) {
             Style::default().fg(MUTED),
         ),
         Line::styled(
-            "On narrow terminals, ←/→ or Tab switches panes.",
+            "On narrow terminals, Tab switches panes.",
             Style::default().fg(MUTED),
         ),
         Line::raw(""),
-        Line::styled("Press any key to close", Style::default().fg(ACCENT)),
+        Line::styled("Esc closes help", Style::default().fg(ACCENT)),
     ];
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(text)
-            .block(pane(" Help ".into(), true))
+            .block(pane(format!(" Help — {keymap:?} keys "), true))
             .style(Style::default().bg(PANEL)),
         popup,
     );
@@ -770,6 +811,49 @@ mod tests {
         let text = screen(&terminal);
         assert!(text.contains("Select files / scroll diff"));
         assert!(text.contains("Edit in $EDITOR at first (visible) hunk"));
+    }
+
+    #[test]
+    fn help_and_popup_hints_follow_the_selected_preset() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        for (keymap, help_keys, delete, output_keys) in [
+            (
+                Keymap::Standard,
+                ["↓/↑", "PgUp/PgDn", "Home/End"],
+                "Delete delete",
+                "↑/↓ scroll · PgUp/PgDn page · Home/End · ←/→ horizontal",
+            ),
+            (
+                Keymap::Vim,
+                ["j/k", "u/d", "g/G"],
+                "D delete",
+                "k/j scroll · u/d page · g/G · h/l horizontal",
+            ),
+        ] {
+            app.keymap = keymap;
+            app.show_help = true;
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let text = screen(&terminal);
+            for keys in help_keys {
+                assert!(text.contains(keys), "{keymap:?}: {keys}");
+            }
+            assert!(text.contains("Tab                 Switch files / diff focus"));
+            assert!(text.contains("Esc closes help"));
+            app.show_help = false;
+
+            app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            assert!(screen(&terminal).contains(delete));
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+            app.operation_details = Some(OperationDetails::new(&crate::git::Operation::Pull));
+            app.show_operation_details = true;
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            assert!(screen(&terminal).contains(output_keys));
+            app.show_operation_details = false;
+        }
     }
 
     #[test]
@@ -1037,8 +1121,8 @@ mod tests {
         assert!(text.contains("   1 │ + aaaaaaaaaaaaaaaaaa"));
         assert!(text.contains("     │   aaaaaaaaaaaaaaaaaa"));
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert_eq!(app.scroll, 2);
         assert!(screen(&terminal).contains("     │   aaaaaaaaaaaaaaaaaa"));
@@ -1073,7 +1157,7 @@ mod tests {
         let mut app = App::new(repo).unwrap();
         app.focus = Focus::Diff;
         for _ in 0..15 {
-            app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         for (width, height) in [(120, 30), (40, 12), (80, 24)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -1260,7 +1344,7 @@ mod tests {
             "linked [locked] [prunable]",
             "Enter switch",
             "r refresh",
-            "D/Del delete",
+            "Delete delete",
             "Esc close",
             linked_repo.root.to_str().unwrap(),
         ] {
@@ -1279,8 +1363,8 @@ mod tests {
     fn worktree_deletion_confirmation_shows_the_target_and_safety_warning() {
         let (_dir, _linked, repo, linked_repo) = crate::git::tests::linked_repo();
         let mut app = App::new(repo).unwrap();
-        for ch in ['w', 'j', 'D'] {
-            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        for code in [KeyCode::Char('w'), KeyCode::Down, KeyCode::Delete] {
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
         }
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1294,7 +1378,7 @@ mod tests {
             "Dirty and locked",
             "Unreferenced detached commits",
             "y delete",
-            "n / Esc cancel",
+            "Esc cancel",
             linked_repo.root.to_str().unwrap(),
         ] {
             assert!(text.contains(expected), "Missing: {expected}");
@@ -1366,11 +1450,9 @@ mod tests {
             ] {
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                 for focus in [Focus::Files, Focus::Diff] {
-                    let code = match focus {
-                        Focus::Files => KeyCode::Left,
-                        Focus::Diff => KeyCode::Right,
-                    };
-                    app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+                    if app.focus != focus {
+                        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+                    }
                     assert!(app.focus == focus);
                     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
                     app.show_help = true;

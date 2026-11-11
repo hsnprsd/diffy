@@ -1,8 +1,10 @@
 mod app;
+mod config;
 mod diff;
 mod editor;
 mod git;
 mod highlight;
+mod keymap;
 mod operation;
 mod ui;
 mod watch;
@@ -34,13 +36,15 @@ fn main() -> Result<()> {
                  PATH defaults to the current directory; subdirectories are accepted.\n\
                  Staged and unstaged changes appear together in the Changes view.\n\
                  Updates automatically when repository files or refs change.\n\
-                 Keys: ←/→/Tab focus · ↑/↓/j/k move\n\
+                 Standard keys: Tab focus · ↑/↓ move\n\
                        Space stage/unstage file or hunk · c commit · p pull · P push\n\
                        w worktrees · e edit in $EDITOR · [/] hunks · ? help · q quit\n\
                        v toggle unified / side-by-side diff\n\n\
                  Git output opens automatically: ↑/↓ or PgUp/PgDn scroll · Esc cancel running / close completed.\n\
                  Commit popup: Ctrl+S commit · Enter newline · Esc cancel.\n\
-                 Worktree picker: Enter switch · D/Del delete · r refresh · Esc close.\n\
+                 Worktree picker: Enter switch · Delete delete · r refresh · Esc close.\n\
+                 Config: $XDG_CONFIG_HOME/diffy/config.toml (default ~/.config/diffy/config.toml).\n\
+                 Set keymap = \"vim\" for Vim-style keys; the default is \"standard\".\n\
                  Pull is fast-forward only. Staging/unstaging never changes working-tree files."
             );
             return Ok(());
@@ -55,12 +59,14 @@ fn main() -> Result<()> {
             bail!("Expected at most one repository path. See diffy --help");
         }
     }
+    let config = config::Config::load()?;
     let repo = Repository::discover(&path.unwrap_or(env::current_dir()?))?;
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("An interactive terminal is required. See diffy --help");
     }
     let mut watcher = Watcher::new(&repo).context("Could not watch repository")?;
     let mut app = App::new(repo)?;
+    app.keymap = config.keymap;
 
     // Ratatui's panic hook and this guard both restore the terminal on exit.
     let _restore = RestoreTerminal;
@@ -116,6 +122,7 @@ fn switch_worktree(path: &Path, app: &mut App, watcher: &mut Watcher) -> Result<
     let mut next_app = App::new(repo)?;
     next_app.focus = app.focus;
     next_app.set_diff_mode(app.diff_mode);
+    next_app.keymap = app.keymap;
     next_app.resize_diff(app.viewport_width, app.viewport_height);
     *watcher = next_watcher;
     *app = next_app;
@@ -207,16 +214,18 @@ mod tests {
         let mut watcher = Watcher::new(&repo).unwrap();
         let mut app = App::new(repo.clone()).unwrap();
         app.focus = Focus::Diff;
+        app.keymap = keymap::Keymap::Vim;
         app.resize_diff(42, 8);
         app.scroll = 5;
         key(&mut app, KeyCode::Char('w'));
-        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Char('j'));
         key(&mut app, KeyCode::Enter);
         let path = app.worktree_request.take().unwrap();
         switch_worktree(&path, &mut app, &mut watcher).unwrap();
         assert_eq!(app.repo.root, linked_repo.root);
         assert_eq!(app.repo.git_dir, linked_repo.git_dir);
         assert_eq!(app.branch, "linked");
+        assert_eq!(app.keymap, keymap::Keymap::Vim);
         assert!(app.focus == Focus::Diff);
         assert_eq!(
             (app.viewport_width, app.viewport_height, app.scroll),
@@ -288,7 +297,7 @@ mod tests {
 
         key(&mut app, KeyCode::Esc); // Close the completed operation's output.
         key(&mut app, KeyCode::Char('w'));
-        key(&mut app, KeyCode::Home);
+        key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Enter);
         let path = app.worktree_request.take().unwrap();
         switch_worktree(&path, &mut app, &mut watcher).unwrap();

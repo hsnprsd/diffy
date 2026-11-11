@@ -9,6 +9,7 @@ use crate::{
     editor::EditRequest,
     git::{Content, FileEntry, Operation, Repository, Worktree},
     highlight::SyntaxHighlighter,
+    keymap::{self, Action, Keymap},
     operation::{self, OperationDetails, OperationEvent, OperationHandle, OperationResult},
 };
 
@@ -33,6 +34,15 @@ impl CommitPopup {
     }
 
     fn edit(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
+            self.message.clear();
+            self.cursor = 0;
+            self.error = None;
+            return;
+        }
+        let Some(code) = keymap::plain_code(key) else {
+            return;
+        };
         let previous = self.message[..self.cursor]
             .char_indices()
             .next_back()
@@ -41,7 +51,7 @@ impl CommitPopup {
             .chars()
             .next()
             .map_or(self.cursor, |ch| self.cursor + ch.len_utf8());
-        match key.code {
+        match code {
             KeyCode::Left => self.cursor = previous,
             KeyCode::Right => self.cursor = next,
             KeyCode::Home => {
@@ -88,17 +98,7 @@ impl CommitPopup {
                 self.error = None;
             }
             KeyCode::Enter => self.insert("\n"),
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.message.clear();
-                self.cursor = 0;
-                self.error = None;
-            }
-            KeyCode::Char(ch)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    && !ch.is_control() =>
-            {
+            KeyCode::Char(ch) if !ch.is_control() => {
                 self.insert(&ch.to_string());
             }
             _ => {}
@@ -143,6 +143,7 @@ pub struct App {
     pub view: DiffView,
     pub diff_mode: DiffMode,
     pub focus: Focus,
+    pub keymap: Keymap,
     pub scroll: usize,
     pub viewport_height: usize,
     pub viewport_width: usize,
@@ -171,6 +172,7 @@ impl App {
             view: DiffView::default(),
             diff_mode: DiffMode::default(),
             focus: Focus::Files,
+            keymap: Keymap::default(),
             scroll: 0,
             viewport_height: 20,
             viewport_width: 80,
@@ -398,11 +400,11 @@ impl App {
         Ok(())
     }
 
-    fn handle_worktree_key(&mut self, key: KeyEvent) {
+    fn handle_worktree_key(&mut self, action: Option<Action>) {
         let popup = self.worktree_popup.as_mut().unwrap();
         if popup.removal.is_some() {
-            match key.code {
-                KeyCode::Char('y') => {
+            match action {
+                Some(Action::ConfirmRemoval) => {
                     let worktree = popup.removal.take().unwrap();
                     if let Err(error) =
                         self.start_operation(Operation::RemoveWorktree(worktree.path))
@@ -410,18 +412,18 @@ impl App {
                         self.worktree_popup.as_mut().unwrap().error = Some(format!("{error:#}"));
                     }
                 }
-                KeyCode::Esc | KeyCode::Char('n' | 'q' | 'w') => popup.removal = None,
+                Some(Action::Close) => popup.removal = None,
                 _ => {}
             }
             return;
         }
         let page = popup.viewport_height.max(1) as isize;
-        let delta = match key.code {
-            KeyCode::Esc | KeyCode::Char('q' | 'w') => {
+        let delta = match action {
+            Some(Action::Close) => {
                 self.worktree_popup = None;
                 return;
             }
-            KeyCode::Enter => {
+            Some(Action::Select) => {
                 if let Some(worktree) = popup
                     .list_state
                     .selected()
@@ -435,25 +437,25 @@ impl App {
                 }
                 return;
             }
-            KeyCode::Delete | KeyCode::Char('D') => {
+            Some(Action::DeleteWorktree) => {
                 if let Err(error) = self.confirm_worktree_removal() {
                     self.worktree_popup.as_mut().unwrap().error =
                         Some(format!("Delete worktree: {error:#}"));
                 }
                 return;
             }
-            KeyCode::Char('r') => {
+            Some(Action::RefreshWorktrees) => {
                 if let Err(error) = self.open_worktrees() {
                     self.worktree_popup.as_mut().unwrap().error = Some(format!("{error:#}"));
                 }
                 return;
             }
-            KeyCode::Down | KeyCode::Char('j') => 1,
-            KeyCode::Up | KeyCode::Char('k') => -1,
-            KeyCode::PageDown | KeyCode::Char('d') => page,
-            KeyCode::PageUp | KeyCode::Char('u') => -page,
-            KeyCode::Home | KeyCode::Char('g') => -isize::MAX,
-            KeyCode::End | KeyCode::Char('G') => isize::MAX,
+            Some(Action::Down) => 1,
+            Some(Action::Up) => -1,
+            Some(Action::PageDown) => page,
+            Some(Action::PageUp) => -page,
+            Some(Action::First) => -isize::MAX,
+            Some(Action::Last) => isize::MAX,
             _ => return,
         };
         if !popup.worktrees.is_empty() {
@@ -662,14 +664,8 @@ impl App {
 
     /// Returns true when the user requests exit; editor requests are handled by the event loop.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            if let Err(error) = self.ensure_idle() {
-                self.error = Some(error.to_string());
-                return false;
-            }
-            return true;
-        }
-        if key.code == KeyCode::Esc
+        let action = self.keymap.action(key);
+        if action == Some(Action::Close)
             && let Some(pending) = &self.pending
         {
             let details = self.operation_details.as_mut().unwrap();
@@ -680,32 +676,32 @@ impl App {
             return false;
         }
         if self.show_help {
-            self.show_help = false;
+            if action == Some(Action::Close) {
+                self.show_help = false;
+            }
             return false;
         }
         if self.show_operation_details {
             let details = self.operation_details.as_mut().unwrap();
             let page = details.viewport_height.saturating_sub(2).max(1) as isize;
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') if self.pending.is_none() => {
+            match action {
+                Some(Action::Close) if self.pending.is_none() => {
                     self.show_operation_details = false;
                 }
-                KeyCode::Down | KeyCode::Char('j') => details.scroll_by(1),
-                KeyCode::Up | KeyCode::Char('k') => details.scroll_by(-1),
-                KeyCode::PageDown | KeyCode::Char('d') => details.scroll_by(page),
-                KeyCode::PageUp | KeyCode::Char('u') => details.scroll_by(-page),
-                KeyCode::Home | KeyCode::Char('g') => {
+                Some(Action::Down) => details.scroll_by(1),
+                Some(Action::Up) => details.scroll_by(-1),
+                Some(Action::PageDown) => details.scroll_by(page),
+                Some(Action::PageUp) => details.scroll_by(-page),
+                Some(Action::First) => {
                     details.follow = false;
                     details.scroll = 0;
                 }
-                KeyCode::End | KeyCode::Char('G') => {
+                Some(Action::Last) => {
                     details.follow = true;
                     details.clamp_scroll();
                 }
-                KeyCode::Char('h') | KeyCode::Left => {
-                    details.horizontal = details.horizontal.saturating_sub(4)
-                }
-                KeyCode::Char('l') | KeyCode::Right => {
+                Some(Action::Left) => details.horizontal = details.horizontal.saturating_sub(4),
+                Some(Action::Right) => {
                     details.horizontal = details
                         .horizontal
                         .saturating_add(4)
@@ -719,9 +715,13 @@ impl App {
             if self.pending.is_some() {
                 return false;
             }
-            match key.code {
-                KeyCode::Esc => self.commit_popup = None,
-                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            match key {
+                _ if action == Some(Action::Close) => self.commit_popup = None,
+                KeyEvent {
+                    code: KeyCode::Char('s'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
                     let message = self.commit_popup.as_ref().unwrap().message.clone();
                     if message.trim().is_empty() {
                         self.commit_popup.as_mut().unwrap().error =
@@ -735,34 +735,34 @@ impl App {
             return false;
         }
         if self.worktree_popup.is_some() {
-            self.handle_worktree_key(key);
+            self.handle_worktree_key(action);
             return false;
         }
-        match key.code {
-            KeyCode::Char('w') => {
+        match action {
+            Some(Action::Worktrees) => {
                 if let Err(error) = self.open_worktrees() {
                     self.error = Some(format!("Worktrees: {error:#}"));
                 }
             }
-            KeyCode::Char('q') => {
+            Some(Action::Quit) => {
                 if let Err(error) = self.ensure_idle() {
                     self.error = Some(error.to_string());
                 } else {
                     return true;
                 }
             }
-            KeyCode::Char(' ') => {
+            Some(Action::Stage) => {
                 if let Err(error) = self.toggle_stage() {
                     self.error = Some(format!("Stage: {error:#}"));
                 }
             }
-            KeyCode::Char('c') => {
+            Some(Action::Commit) => {
                 if let Err(error) = self.open_commit() {
                     self.error = Some(format!("Commit: {error:#}"));
                 }
             }
-            KeyCode::Char(ch @ ('p' | 'P')) => {
-                let operation = if ch == 'p' {
+            Some(action @ (Action::Pull | Action::Push)) => {
+                let operation = if action == Action::Pull {
                     Operation::Pull
                 } else {
                     Operation::Push
@@ -771,30 +771,28 @@ impl App {
                     self.error = Some(format!("Git: {error:#}"));
                 }
             }
-            KeyCode::Char('e') => self.request_edit(),
-            KeyCode::Char('v') => self.set_diff_mode(self.diff_mode.toggle()),
-            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
-            KeyCode::Tab | KeyCode::BackTab => {
+            Some(Action::Edit) => self.request_edit(),
+            Some(Action::ToggleView) => self.set_diff_mode(self.diff_mode.toggle()),
+            Some(Action::Help) => self.show_help = true,
+            Some(Action::Focus) => {
                 self.focus = if self.focus == Focus::Files {
                     Focus::Diff
                 } else {
                     Focus::Files
                 };
             }
-            KeyCode::Left => self.focus = Focus::Files,
-            KeyCode::Right | KeyCode::Enter => self.focus = Focus::Diff,
-            KeyCode::Char('j') | KeyCode::Down => self.vertical(1),
-            KeyCode::Char('k') | KeyCode::Up => self.vertical(-1),
-            KeyCode::PageDown | KeyCode::Char('d') => {
+            Some(Action::Down) => self.vertical(1),
+            Some(Action::Up) => self.vertical(-1),
+            Some(Action::PageDown) => {
                 self.vertical(self.viewport_height.saturating_sub(2).max(1) as isize)
             }
-            KeyCode::PageUp | KeyCode::Char('u') => {
+            Some(Action::PageUp) => {
                 self.vertical(-(self.viewport_height.saturating_sub(2).max(1) as isize))
             }
-            KeyCode::Home | KeyCode::Char('g') => self.vertical(-(isize::MAX)),
-            KeyCode::End | KeyCode::Char('G') => self.vertical(isize::MAX),
-            KeyCode::Char(']') => self.hunk(true),
-            KeyCode::Char('[') => self.hunk(false),
+            Some(Action::First) => self.vertical(-(isize::MAX)),
+            Some(Action::Last) => self.vertical(isize::MAX),
+            Some(Action::NextHunk) => self.hunk(true),
+            Some(Action::PreviousHunk) => self.hunk(false),
             _ => {}
         }
         false
@@ -813,28 +811,165 @@ mod tests {
     }
 
     #[test]
-    fn arrow_keys_focus_panes_without_changing_selection_or_scroll() {
-        let (dir, repo) = repo();
-        let content = format!("{}\n", "x".repeat(120)).repeat(30);
-        std::fs::write(dir.path().join("a.txt"), content).unwrap();
-        std::fs::write(dir.path().join("b.txt"), "other\n").unwrap();
-        let mut app = App::new(repo).unwrap();
-        app.scroll = 2;
-        let selected = app.selected().unwrap().path.clone();
-        for (code, focus) in [
-            (KeyCode::Left, Focus::Files),
-            (KeyCode::Right, Focus::Diff),
-            (KeyCode::Right, Focus::Diff),
-            (KeyCode::Left, Focus::Files),
-            (KeyCode::Left, Focus::Files),
-            (KeyCode::Tab, Focus::Diff),
-            (KeyCode::BackTab, Focus::Files),
-        ] {
-            assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
-            assert!(app.focus == focus);
-            assert_eq!(app.selected().unwrap().path, selected);
-            assert_eq!(app.scroll, 2);
+    fn tab_is_the_only_pane_focus_shortcut_in_both_presets() {
+        for keymap in [Keymap::Standard, Keymap::Vim] {
+            let (dir, repo) = repo();
+            std::fs::write(dir.path().join("a.txt"), "line\n".repeat(30)).unwrap();
+            let mut app = App::new(repo).unwrap();
+            app.keymap = keymap;
+            app.scroll = 2;
+            for focus in [Focus::Diff, Focus::Files] {
+                assert!(!app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+                assert!(app.focus == focus);
+                for code in [
+                    KeyCode::Left,
+                    KeyCode::Right,
+                    KeyCode::Enter,
+                    KeyCode::BackTab,
+                    KeyCode::Char('h'),
+                    KeyCode::Char('l'),
+                ] {
+                    app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+                    assert!(app.focus == focus);
+                }
+                assert_eq!(app.selected().unwrap().path, PathBuf::from("a.txt"));
+                assert_eq!(app.scroll, 2);
+            }
         }
+    }
+
+    #[test]
+    fn output_navigation_uses_only_the_active_preset() {
+        for (keymap, keys, inactive) in [
+            (
+                Keymap::Standard,
+                [
+                    KeyCode::Home,
+                    KeyCode::Down,
+                    KeyCode::PageDown,
+                    KeyCode::Up,
+                    KeyCode::PageUp,
+                    KeyCode::Right,
+                    KeyCode::Left,
+                    KeyCode::End,
+                ],
+                KeyCode::Char('j'),
+            ),
+            (
+                Keymap::Vim,
+                [
+                    KeyCode::Char('g'),
+                    KeyCode::Char('j'),
+                    KeyCode::Char('d'),
+                    KeyCode::Char('k'),
+                    KeyCode::Char('u'),
+                    KeyCode::Char('l'),
+                    KeyCode::Char('h'),
+                    KeyCode::Char('G'),
+                ],
+                KeyCode::Down,
+            ),
+        ] {
+            let (_dir, repo) = repo();
+            let mut app = App::new(repo).unwrap();
+            app.keymap = keymap;
+            let mut details = OperationDetails::new(&Operation::Pull);
+            details.viewport_height = 4;
+            details.viewport_width = 10;
+            details.append(&("long output line\n".repeat(20)));
+            details.finish(OperationResult::Success);
+            let bottom = details.max_scroll();
+            app.operation_details = Some(details);
+            app.show_operation_details = true;
+            for (code, scroll, horizontal, follow) in [
+                (keys[0], 0, 0, false),
+                (keys[1], 1, 0, false),
+                (keys[2], 3, 0, false),
+                (keys[3], 2, 0, false),
+                (keys[4], 0, 0, false),
+                (keys[5], 0, 4, false),
+                (keys[6], 0, 0, false),
+                (keys[7], bottom, 0, true),
+            ] {
+                app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+                let details = app.operation_details.as_ref().unwrap();
+                assert_eq!(
+                    (details.scroll, details.horizontal, details.follow),
+                    (scroll, horizontal, follow),
+                    "{keymap:?}: {code:?}"
+                );
+            }
+            for code in [inactive, KeyCode::Char('q')] {
+                app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+                assert!(app.show_operation_details);
+                assert_eq!(app.operation_details.as_ref().unwrap().scroll, bottom);
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(!app.show_operation_details);
+        }
+    }
+
+    #[test]
+    fn worktree_picker_uses_the_active_preset_and_escape_cancels() {
+        for (keymap, down, delete) in [
+            (Keymap::Standard, KeyCode::Down, KeyCode::Delete),
+            (Keymap::Vim, KeyCode::Char('j'), KeyCode::Char('D')),
+        ] {
+            let (_dir, _linked, repo, linked_repo) = crate::git::tests::linked_repo();
+            let mut app = App::new(repo).unwrap();
+            app.keymap = keymap;
+            app.handle_key(key('w'));
+            app.handle_key(KeyEvent::new(down, KeyModifiers::NONE));
+            app.handle_key(KeyEvent::new(delete, KeyModifiers::NONE));
+            for ch in ['n', 'q', 'w'] {
+                app.handle_key(key(ch));
+                assert_eq!(
+                    app.worktree_popup
+                        .as_ref()
+                        .unwrap()
+                        .removal
+                        .as_ref()
+                        .unwrap()
+                        .path,
+                    linked_repo.root
+                );
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            let popup = app.worktree_popup.as_ref().unwrap();
+            assert!(popup.removal.is_none());
+            assert_eq!(popup.list_state.selected(), Some(1));
+            for ch in ['q', 'w'] {
+                app.handle_key(key(ch));
+                assert_eq!(
+                    app.worktree_popup.as_ref().unwrap().list_state.selected(),
+                    Some(1)
+                );
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(app.worktree_popup.is_none());
+            assert!(linked_repo.root.is_dir());
+        }
+    }
+
+    #[test]
+    fn vim_commit_editor_inserts_navigation_letters_as_text() {
+        let (dir, repo) = repo();
+        std::fs::write(dir.path().join("file.txt"), "changes\n").unwrap();
+        let mut app = App::new(repo).unwrap();
+        app.keymap = Keymap::Vim;
+        app.handle_key(key('c'));
+        for ch in "hjkludgG".chars() {
+            app.handle_key(key(ch));
+        }
+        assert_eq!(app.commit_popup.as_ref().unwrap().message, "hjkludgG");
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.commit_popup.as_ref().unwrap().message, "hjkludG");
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.commit_popup.as_ref().unwrap().message, "hjkludG");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.commit_popup.is_none());
+        assert!(app.handle_key(key('q')));
     }
 
     #[test]
@@ -850,9 +985,9 @@ mod tests {
             assert_eq!(app.files.len(), 2);
             assert_eq!(app.selected().unwrap().path, PathBuf::from("file.txt"));
             assert_eq!(app.view.source, source);
-            app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
             assert!(app.focus == Focus::Diff);
-            app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
             assert!(app.focus == Focus::Files);
         }
         app.handle_key(key(' '));
@@ -865,36 +1000,29 @@ mod tests {
     }
 
     #[test]
-    fn vertical_navigation_uses_the_focused_pane() {
-        let (dir, repo) = repo();
-        let content = "line\n".repeat(30);
-        std::fs::write(dir.path().join("a.txt"), &content).unwrap();
-        std::fs::write(dir.path().join("b.txt"), &content).unwrap();
-        let mut app = App::new(repo).unwrap();
-        for (code, path) in [
-            (KeyCode::Down, "b.txt"),
-            (KeyCode::Up, "a.txt"),
-            (KeyCode::Char('j'), "b.txt"),
-            (KeyCode::Char('k'), "a.txt"),
+    fn vertical_navigation_uses_the_focused_pane_in_both_presets() {
+        for (keymap, down, up) in [
+            (Keymap::Standard, KeyCode::Down, KeyCode::Up),
+            (Keymap::Vim, KeyCode::Char('j'), KeyCode::Char('k')),
         ] {
-            assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
-            assert_eq!(app.selected().unwrap().path, PathBuf::from(path));
-            assert_eq!(app.scroll, 0);
+            let (dir, repo) = repo();
+            for path in ["a.txt", "b.txt"] {
+                std::fs::write(dir.path().join(path), "line\n".repeat(30)).unwrap();
+            }
+            let mut app = App::new(repo).unwrap();
+            app.keymap = keymap;
+            for (code, path) in [(down, "b.txt"), (up, "a.txt")] {
+                app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+                assert_eq!(app.selected().unwrap().path, PathBuf::from(path));
+                assert_eq!(app.scroll, 0);
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            for (code, scroll) in [(down, 1), (down, 2), (up, 1), (up, 0)] {
+                app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+                assert_eq!(app.selected().unwrap().path, PathBuf::from("a.txt"));
+                assert_eq!(app.scroll, scroll);
+            }
         }
-        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        for (code, scroll) in [
-            (KeyCode::Down, 1),
-            (KeyCode::Char('j'), 2),
-            (KeyCode::Up, 1),
-            (KeyCode::Char('k'), 0),
-        ] {
-            assert!(!app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)));
-            assert_eq!(app.selected().unwrap().path, PathBuf::from("a.txt"));
-            assert_eq!(app.scroll, scroll);
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.selected().unwrap().path, PathBuf::from("b.txt"));
     }
 
     #[test]
@@ -938,7 +1066,14 @@ mod tests {
 
     #[test]
     fn view_toggle_preserves_file_focus_source_patches_and_repository_contents() {
+        for keymap in [Keymap::Standard, Keymap::Vim] {
+            assert_view_toggle(keymap);
+        }
+    }
+
+    fn assert_view_toggle(keymap: Keymap) {
         let (dir, mut app) = app_with_hunks();
+        app.keymap = keymap;
         let path = dir.path().join("a file.txt");
         let contents = std::fs::read(&path).unwrap();
         let index = std::fs::read(app.repo.git_dir.join("index")).unwrap();
@@ -953,7 +1088,12 @@ mod tests {
         assert_eq!(app.selected().unwrap().path, selected);
         assert_eq!(app.view.source, source);
         assert_eq!(app.view.patches, patches);
-        app.handle_key(key('j'));
+        let down = if keymap == Keymap::Standard {
+            KeyCode::Down
+        } else {
+            KeyCode::Char('j')
+        };
+        app.handle_key(KeyEvent::new(down, KeyModifiers::NONE));
         assert!(app.selected().unwrap().staged);
         assert!(!app.view.split_rows.is_empty());
         app.refresh();
@@ -995,8 +1135,9 @@ mod tests {
         let (_dir, mut app) = app_with_hunks();
         app.show_help = true;
         app.handle_key(key('v'));
-        assert!(!app.show_help);
+        assert!(app.show_help);
         assert_eq!(app.diff_mode, DiffMode::Unified);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.handle_key(key('c'));
         app.handle_key(key('v'));
         assert_eq!(app.commit_popup.as_ref().unwrap().message, "v");
@@ -1043,13 +1184,13 @@ mod tests {
             })
             .unwrap();
         app.scroll = continuation;
-        app.handle_key(key('j'));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.scroll, continuation + 1);
-        app.handle_key(key('k'));
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(app.scroll, continuation);
-        app.handle_key(key('d'));
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         assert_eq!(app.scroll, continuation + 2);
-        app.handle_key(key('u'));
+        app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         assert_eq!(app.scroll, continuation);
         app.handle_key(key('e'));
         assert_eq!(app.edit_request.take().unwrap().line, Some(47));
@@ -1139,7 +1280,7 @@ mod tests {
         app.viewport_height = 4;
         app.handle_key(key(']'));
         assert_eq!(app.scroll, app.view.hunks[1]);
-        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.handle_key(key('e'));
         assert_eq!(
             app.edit_request.take(),
@@ -1158,20 +1299,20 @@ mod tests {
         app.viewport_height = 4;
         app.handle_key(key(']'));
         assert_eq!(app.scroll, app.view.hunks[1]);
-        app.handle_key(key('j'));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(key('e'));
         assert_eq!(app.edit_request.take().unwrap().line, Some(47));
         app.handle_key(key('['));
         assert_eq!(app.scroll, app.view.hunks[1]);
         app.handle_key(key('['));
         assert_eq!(app.scroll, 0);
-        app.handle_key(key('d'));
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         assert_eq!(app.scroll, 2);
-        app.handle_key(key('G'));
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(app.scroll, app.view.rows.len() - app.viewport_height);
-        app.handle_key(key('g'));
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert_eq!(app.scroll, 0);
-        app.handle_key(key('G'));
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         std::fs::write(dir.path().join("a file.txt"), "short\n").unwrap();
         app.refresh();
         assert!(app.scroll <= app.view.rows.len().saturating_sub(app.viewport_height));
@@ -1209,8 +1350,9 @@ mod tests {
         app.refresh();
         app.handle_key(key('?'));
         app.handle_key(key('e'));
-        assert!(!app.show_help);
+        assert!(app.show_help);
         assert!(app.edit_request.is_none());
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.handle_key(key('e'));
         assert_eq!(
             app.edit_request.take(),
@@ -1338,7 +1480,8 @@ mod tests {
         app.handle_key(key(']'));
         assert_eq!(app.active_hunk(), 1);
         assert_eq!(app.scroll, app.view.wrapped_hunks[1]);
-        app.handle_key(key('j')); // The header is offscreen, but the middle hunk is still active.
+        // The header is offscreen, but the middle hunk is still active.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.active_hunk(), 1);
         app.handle_key(key(' '));
         assert!(app.error.is_none(), "{:?}", app.error);
@@ -1351,9 +1494,10 @@ mod tests {
         assert!(!staged_text.contains("changed 10\n"));
         assert!(!staged_text.contains("changed 80\n"));
         let working = std::fs::read_to_string(dir.path().join("a file.txt")).unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        app.handle_key(key('j')); // Select the staged entry in the same view.
-        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        // Select the staged entry in the same view.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(app.selected().unwrap().staged);
         assert_eq!(app.view.hunks.len(), 1);
         app.handle_key(key(' '));
@@ -1387,7 +1531,7 @@ mod tests {
         assert!(app.selected().unwrap().staged);
         app.viewport_height = 4;
         app.handle_key(key(']'));
-        app.handle_key(key('j'));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let scroll = app.scroll;
         let source = app.view.source.clone();
 
@@ -1700,7 +1844,8 @@ mod tests {
         assert!(!app.handle_key(key('q')));
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
         app.handle_key(key(' '));
-        assert!(app.error.as_ref().unwrap().contains("Wait for"));
+        assert_eq!(app.operation_label(), Some("Pushing"));
+        assert!(app.show_operation_details);
         app.handle_key(key('e'));
         assert!(app.edit_request.is_none());
         wait_for_operation(&mut app);
@@ -1951,7 +2096,7 @@ mod tests {
         assert!(app.pending.is_none());
         assert!(!app.show_help);
 
-        app.handle_key(key('j'));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(
             app.worktree_popup.as_ref().unwrap().list_state.selected(),
             Some(1)
@@ -1997,12 +2142,6 @@ mod tests {
             (KeyCode::Down, 2),
             (KeyCode::PageUp, 0),
             (KeyCode::PageDown, 2),
-            (KeyCode::Char('g'), 0),
-            (KeyCode::Char('j'), 1),
-            (KeyCode::Char('k'), 0),
-            (KeyCode::Char('G'), 2),
-            (KeyCode::Char('u'), 0),
-            (KeyCode::Char('d'), 2),
         ] {
             app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
             assert_eq!(
@@ -2010,10 +2149,10 @@ mod tests {
                 Some(expected)
             );
         }
-        app.handle_key(key('g'));
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.worktree_request.take(), Some(repo.root));
-        assert!(!app.handle_key(key('q')));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.worktree_popup.is_none());
     }
 
@@ -2023,7 +2162,7 @@ mod tests {
         std::fs::write(repo.root.join("main.txt"), "main changes\n").unwrap();
         let mut app = App::new(repo).unwrap();
         app.handle_key(key('w'));
-        app.handle_key(key('D'));
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
         assert!(
             app.worktree_popup
                 .as_ref()
@@ -2034,8 +2173,8 @@ mod tests {
                 .contains("current worktree")
         );
         assert!(app.worktree_popup.as_ref().unwrap().removal.is_none());
-        app.handle_key(key('j'));
-        for cancel in [KeyCode::Esc, KeyCode::Char('n')] {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        for _ in 0..2 {
             app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
             assert_eq!(
                 app.worktree_popup
@@ -2063,11 +2202,11 @@ mod tests {
             );
             assert!(app.pending.is_none());
             assert!(app.worktree_request.is_none());
-            app.handle_key(KeyEvent::new(cancel, KeyModifiers::NONE));
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
             assert!(app.worktree_popup.as_ref().unwrap().removal.is_none());
             assert!(linked_repo.root.is_dir());
         }
-        app.handle_key(key('D'));
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
         app.handle_key(key('y'));
         assert_eq!(app.operation_label(), Some("Removing worktree"));
         assert!(app.show_operation_details);
@@ -2107,8 +2246,8 @@ mod tests {
             let (dir, _linked, repo, linked_repo) = crate::git::tests::linked_repo();
             let mut app = App::new(repo).unwrap();
             app.handle_key(key('w'));
-            app.handle_key(key('j'));
-            app.handle_key(key('D'));
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
             assert!(app.worktree_popup.as_ref().unwrap().removal.is_some());
             if locked {
                 git(
@@ -2187,6 +2326,8 @@ mod tests {
         app.handle_key(key('?'));
         assert!(app.show_help);
         assert!(!app.handle_key(key('q')));
+        assert!(app.show_help);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.show_help);
         assert!(app.handle_key(key('q')));
     }

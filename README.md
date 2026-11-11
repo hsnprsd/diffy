@@ -23,7 +23,7 @@ Ratatui, Tree-sitter, and native filesystem notifications.
   Supports detached HEADs, linked worktrees, and unborn branches.
 - **Worktree picker:** press `w` to choose another worktree in the same repository.
   Review its staged and unstaged changes with live updates, without restarting.
-  Delete obsolete worktrees with `D` / `Delete` and explicit confirmation.
+  Delete obsolete worktrees with `Delete` (`D` in the Vim preset) and explicit confirmation.
 - **Open in your editor:** press `e` in either pane to open the working-tree file
   in `$EDITOR`, then return to diffy when the editor exits. Opens at the first
   visible hunk in the Diff pane, or the file's first hunk in the Files pane.
@@ -86,31 +86,73 @@ against the index's “ours” stage.
 
 ### Keyboard shortcuts
 
+Each action has one shortcut in the active preset. The default is **standard**;
+the built-in **vim** preset replaces navigation and worktree-deletion keys rather
+than adding aliases. `Tab` is the only pane-focus shortcut in both presets.
+
+| Standard | Vim | Action |
+| --- | --- | --- |
+| `Tab` | `Tab` | Switch focus between files and diff |
+| `↓` | `j` | Select the next file / scroll down |
+| `↑` | `k` | Select the previous file / scroll up |
+| `PageDown` | `d` | Page down |
+| `PageUp` | `u` | Page up |
+| `Home` | `g` | First row or file |
+| `End` | `G` | Last row or file; resume following Git output |
+| `←` | `h` | Scroll Git output left |
+| `→` | `l` | Scroll Git output right |
+| `Delete` | `D` | Request deletion of the selected worktree (picker only) |
+
+These shortcuts are shared by both presets:
+
 | Key | Action |
 | --- | --- |
-| `←` / `→` | Focus files / diff |
-| `Tab` / `Shift+Tab` | Switch focus between files and diff |
-| `Enter` | Focus the diff |
 | `v` | Toggle unified (inline) / side-by-side diff |
-| `j` / `k`, `↓` / `↑` | Select files in the Files pane; scroll in the Diff pane |
 | `Space` | Stage an unstaged entry / unstage a staged entry: whole file in Files, first visible hunk in Diff |
 | `w` | Choose a worktree to review |
 | `c` | Open the commit-message popup (staged changes, or all changes if nothing is staged) |
-| `p` / `P` | Pull (fast-forward only) / push the current branch |
-| `Esc` | Cancel a running Git operation; close its output after completion |
+| `p` | Pull the current branch (fast-forward only) |
+| `P` | Push the current branch |
+| `Esc` | Close help or a popup; cancel a running Git operation |
 | `e` | Open in `$EDITOR` at the first visible hunk (Diff pane) or first file hunk (Files pane) |
-| `PageUp` / `PageDown`, `u` / `d` | Page up / down |
-| `Home` / `End`, `g` / `G` | First / last row or file |
-| `[` / `]` | Previous / next hunk |
-| `?` / `F1` | Help (any key closes it) |
-| `q` / `Ctrl+C` | Quit |
+| `[` | Previous hunk |
+| `]` | Next hunk |
+| `?` | Show help |
+| `q` | Quit (outside popups) |
+| `Enter` | Switch to the selected worktree (picker only); insert a newline in a commit message |
+| `r` | Refresh the worktree picker |
+| `y` | Confirm worktree deletion |
+| `Ctrl+S` | Submit the commit message |
+| `Ctrl+U` | Clear the commit message |
+
+Commit-message editing uses ordinary text input, arrow keys, Home/End, and
+Backspace/Delete in both presets; it does not enter a Vim editing mode.
+`Shift+Tab`, `F1`, `Ctrl+C`, and inactive-preset navigation keys are not aliases.
 
 Long diff lines wrap automatically to the pane width, preserving highlighting and
 keeping continuation lines aligned beneath the code. Line numbers and change
 markers appear only on the first screen row of each source line. Scrolling and
 paging move through screen rows, including wrapped continuations.
 
-Below 80 columns, only the focused pane is shown; `←` / `→` or `Tab` switches panes.
+Below 80 columns, only the focused pane is shown; `Tab` switches panes.
+
+### Configuration
+
+Diffy reads `$XDG_CONFIG_HOME/diffy/config.toml`, falling back to
+`~/.config/diffy/config.toml` when `XDG_CONFIG_HOME` is unset, empty, or relative.
+A missing config file or omitted `keymap` uses the standard preset.
+
+To select the built-in Vim-style keymapping, create the file with:
+
+```toml
+keymap = "vim"
+```
+
+Use `keymap = "standard"` to select the default explicitly. Restart diffy after
+changing the config. Invalid TOML, unknown settings, and unknown preset names
+report an error with the config path before the terminal UI starts. In-app help
+and popup hints show only the active preset's shortcuts; the preset stays active
+when reviewing another worktree.
 
 ### Toggle diff layouts
 
@@ -139,9 +181,10 @@ the pane automatically restores side-by-side without changing your preference.
 
 Press **`w`** to open the worktree picker. It lists this repository's main and
 linked worktrees with their branch (or detached HEAD), full path, and any locked
-or prunable status. **`*`** marks the current worktree. Use **`↑`/`↓`** or **`j`/`k`**
-to select one, then **`Enter`** to switch; **`Esc`**, **`q`**, or **`w`** cancels.
-PageUp/PageDown (or `u`/`d`) and Home/End (or `g`/`G`) navigate longer lists.
+or prunable status. **`*`** marks the current worktree. Use **`↑`/`↓`** in the
+standard preset (**`k`/`j`** in Vim) to select one, then **`Enter`** to switch;
+**`Esc`** cancels. PageUp/PageDown and Home/End navigate longer lists in standard;
+Vim uses `u`/`d` and `g`/`G`.
 The list is refreshed each time it opens; press **`r`** to reload it while open.
 Worktree discovery uses Git 2.36+'s NUL-delimited output to preserve unusual paths.
 
@@ -161,10 +204,10 @@ or refresh the list. Bare repositories are not selectable.
 
 ### Delete an obsolete worktree
 
-In the worktree picker, select a worktree and press **`D`** or **`Delete`**. The
-confirmation shows its branch and full path. Press **`y`** to delete it, or **`n`**
-/ **`Esc`** to cancel; Enter does not confirm. Deletion removes the worktree's
-directory **including ignored files**, and its Git registration, but **keeps its
+In the worktree picker, select a worktree and press **`Delete`** in the standard
+preset (**`D`** in Vim). The confirmation shows its branch and full path.
+Press **`y`** to delete it, or **`Esc`** to cancel; Enter does not confirm.
+Deletion removes the worktree's directory **including ignored files**, and its Git registration, but **keeps its
 branch**. Commits reachable only through a detached HEAD can eventually be
 garbage-collected after removal. A missing/prunable worktree can also be removed;
 only the selected registration is cleaned up, not every stale worktree.
@@ -234,14 +277,16 @@ arrives. Pull/push explicitly enable Git's progress output. After completion the
 result changes to **Committed**, **Pulled**, or **Pushed to REMOTE (BRANCH)**,
 rather than leaving a running-operation label behind.
 
-In the output popup, **`↑`/`↓`** or **`j`/`k`** scroll, **`PageUp`/`PageDown`**
-(or `u`/`d`) page, **`Home`** goes to the beginning, and **`End`** resumes following
-new output. Scrolling up pauses following so incoming output does not move the
-text you are reading. **`h`/`l`** or `←`/`→` scroll long lines horizontally.
+In the output popup, the standard preset uses **`↑`/`↓`** to scroll,
+**`PageUp`/`PageDown`** to page, **`Home`** to go to the beginning, **`End`** to
+resume following new output, and **`←`/`→`** to scroll horizontally.
+The Vim preset uses **`k`/`j`**, **`u`/`d`**, **`g`**, **`G`**, and **`h`/`l`**
+respectively. Scrolling up pauses following so incoming output does not move the
+text you are reading.
 Press **`Esc`** while a command is running to cancel it. The popup shows
 **Cancelling…** while Git stops, then **Git operation cancelled**; output and any
 commit draft are preserved. The popup stays open and scrollable during cancellation.
-After completion, **`Esc`** or `q` closes it. Failures and their output remain
+After completion, **`Esc`** closes it. Failures and their output remain
 visible across filesystem refreshes.
 
 On Unix, cancellation interrupts Git and its child processes (including hooks and
@@ -270,7 +315,7 @@ Press **`e`** in the Files pane to open the selected file at its first hunk.
 In the Diff pane, **`e`** opens at the first visible hunk, including a partially
 visible hunk whose header has scrolled offscreen. The editor opens at the hunk's
 first new-file line (including context), not the first visible row. Scrolling
-with `j`/`k` or `↑`/`↓` does not add a cursor. Notices without hunks or hunks
+with `↑`/`↓` (`k`/`j` in Vim) does not add a cursor. Notices without hunks or hunks
 without new-file line numbers open at line 1.
 
 Diffy waits for the editor to exit, restores the interface, and refreshes the diff.
@@ -344,8 +389,9 @@ confirmed worktree removal and dirty/locked/current/main worktree protections, a
 bundled highlighting queries, word-level changes (including Unicode, punctuation,
 syntax-color preservation, wrapped rendering, and unchanged staging patches),
 side-by-side alignment and wrapping, layout toggling and narrow-pane fallback,
-hunk navigation/staging/editor actions in both layouts, keyboard navigation, editor commands
-and visible-hunk line mapping, small terminal layouts, filesystem/index/ref
+hunk navigation/staging/editor actions in both layouts, single-shortcut standard/Vim
+presets, config loading and validation, keyboard navigation, editor commands and
+visible-hunk line mapping, small terminal layouts, filesystem/index/ref
 notifications, and CLI errors. Staging/commit tests cover whole files, individual
 hunks, stale previews, unusual paths, CRLF/missing newlines, Unicode message
 editing, automatic whole-repository commits when nothing is staged, ignored files,

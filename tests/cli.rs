@@ -1,7 +1,9 @@
 use std::process::Command;
 
 fn diffy() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_diffy"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_diffy"));
+    command.env_remove("XDG_CONFIG_HOME").env_remove("HOME");
+    command
 }
 
 #[test]
@@ -23,18 +25,64 @@ fn help_describes_automatic_updates_and_pane_navigation() {
     assert!(help.contains("Staged and unstaged changes appear together"));
     assert!(help.contains("Usage: diffy [PATH]"));
     assert!(help.contains("Updates automatically"));
-    assert!(help.contains("←/→/Tab focus"));
-    assert!(help.contains("↑/↓/j/k move"));
+    assert!(help.contains("Standard keys: Tab focus · ↑/↓ move"));
     assert!(help.contains("e edit in $EDITOR"));
     assert!(help.contains("v toggle unified / side-by-side diff"));
     assert!(help.contains("w worktrees"));
-    assert!(help.contains("Worktree picker: Enter switch · D/Del delete · r refresh · Esc close"));
+    assert!(help.contains("Worktree picker: Enter switch · Delete delete · r refresh · Esc close"));
+    assert!(help.contains("$XDG_CONFIG_HOME/diffy/config.toml"));
+    assert!(help.contains("keymap = \"vim\""));
     assert!(help.contains("Space stage/unstage file or hunk"));
     assert!(help.contains("c commit · p pull · P push"));
     assert!(help.contains("Ctrl+S commit"));
     assert!(help.contains("Pull is fast-forward only"));
     assert!(help.contains("Git output opens automatically"));
     assert!(help.contains("PgUp/PgDn scroll · Esc cancel running / close completed"));
+}
+
+#[test]
+fn config_is_loaded_from_xdg_or_home_before_starting_the_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    for use_xdg in [false, true] {
+        let base = if use_xdg {
+            dir.path().join("xdg")
+        } else {
+            dir.path().join(".config")
+        };
+        let config_dir = base.join("diffy");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let path = config_dir.join("config.toml");
+        std::fs::write(&path, "keymap = \"unknown\"\n").unwrap();
+        let mut command = diffy();
+        command.env("HOME", dir.path()).arg(dir.path());
+        if use_xdg {
+            command.env("XDG_CONFIG_HOME", &base);
+        }
+        let output = command.output().unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(
+            error.contains(&format!("Invalid config in {}", path.display())),
+            "{error}"
+        );
+        assert!(error.contains("unknown variant"), "{error}");
+
+        for option in ["--help", "--version"] {
+            let output = diffy()
+                .env("XDG_CONFIG_HOME", &base)
+                .arg(option)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        }
+        for preset in ["standard", "vim"] {
+            std::fs::write(&path, format!("keymap = \"{preset}\"\n")).unwrap();
+            let output = command.output().unwrap();
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("Not inside a Git working tree")
+            );
+        }
+    }
 }
 
 #[test]
