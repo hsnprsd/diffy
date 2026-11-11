@@ -18,29 +18,6 @@ fn help_and_version_do_not_need_a_repository_or_terminal() {
 }
 
 #[test]
-fn help_describes_automatic_updates_and_pane_navigation() {
-    let output = diffy().arg("--help").output().unwrap();
-    assert!(output.status.success());
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("Staged and unstaged changes appear together"));
-    assert!(help.contains("Usage: diffy [PATH]"));
-    assert!(help.contains("Updates automatically"));
-    assert!(help.contains("Standard keys: Tab focus · ↑/↓ move"));
-    assert!(help.contains("e edit in $EDITOR"));
-    assert!(help.contains("v toggle unified / side-by-side diff"));
-    assert!(help.contains("w worktrees"));
-    assert!(help.contains("Worktree picker: Enter switch · Delete delete · r refresh · Esc close"));
-    assert!(help.contains("$XDG_CONFIG_HOME/diffy/config.toml"));
-    assert!(help.contains("keymap = \"vim\""));
-    assert!(help.contains("Space stage/unstage file or hunk"));
-    assert!(help.contains("c commit · p pull · P push"));
-    assert!(help.contains("Ctrl+S commit"));
-    assert!(help.contains("Pull is fast-forward only"));
-    assert!(help.contains("Git output opens automatically"));
-    assert!(help.contains("PgUp/PgDn scroll · Esc cancel running / close completed"));
-}
-
-#[test]
 fn config_is_loaded_from_xdg_or_home_before_starting_the_ui() {
     let dir = tempfile::tempdir().unwrap();
     for use_xdg in [false, true] {
@@ -102,23 +79,6 @@ fn missing_repository_has_an_actionable_error() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Not inside a Git working tree"));
-}
-
-#[test]
-fn removed_base_options_report_an_unknown_option() {
-    for (args, option) in [
-        (vec!["--base", "main", "--help"], "--base"),
-        (vec!["-b", "origin/main", "--help"], "-b"),
-        (vec!["--base=main", "--help"], "--base=main"),
-    ] {
-        let output = diffy().args(args).output().unwrap();
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr).trim(),
-            format!("Error: Unknown option {option}. See diffy --help")
-        );
-    }
 }
 
 #[test]

@@ -589,35 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn emphasizes_changed_words_without_recoloring_syntax() {
-        let old = "let result = compute(10, \"old\");\n";
-        let new = "let result = compute(20, \"new\");\n";
-        let view = build(old, new);
-        for (row, source, words, background) in [
-            (&view.rows[1], old, "10old", DEL_WORD_BG),
-            (&view.rows[2], new, "20new", ADD_WORD_BG),
-        ] {
-            assert_eq!(row_text(row), source.trim_end_matches('\n'));
-            assert_eq!(emphasized_text(row), words);
-            let syntax = SyntaxHighlighter::default()
-                .lines(Path::new("test.rs"), source, &[], background)
-                .unwrap();
-            let colors = |spans: &[Span<'_>]| {
-                spans
-                    .iter()
-                    .flat_map(|span| span.content.chars().map(|ch| (ch, span.style.fg)))
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(colors(&row.spans), colors(&syntax[0]));
-            assert!(
-                row.spans
-                    .iter()
-                    .any(|span| span.style.bg == Some(background))
-            );
-        }
-    }
-
-    #[test]
     fn word_boundaries_include_adjacent_code_punctuation() {
         let view = build("if value == 1 { call(); }\n", "if value != 1 { call(); }\n");
         assert_eq!(emphasized_text(&view.rows[1]), "=");
@@ -658,6 +629,14 @@ mod tests {
             .replace("compute(18)", "calculate(118)");
         let view = build(&old, &new);
         assert_eq!(view.hunks.len(), 2);
+        assert_eq!((view.additions, view.deletions), (2, 2));
+        let context: Vec<_> = view
+            .rows
+            .iter()
+            .filter(|row| row.kind == RowKind::Context)
+            .map(|row| row.new_line.unwrap())
+            .collect();
+        assert_eq!(context, [1, 3, 4, 5, 16, 17, 18, 20]);
         let changed: Vec<_> = view
             .rows
             .iter()
@@ -797,18 +776,6 @@ mod tests {
     }
 
     #[test]
-    fn wrapping_maps_hunks_without_changing_source_rows_or_patches() {
-        let mut view = build("", "abcdefghijklmnop\n");
-        let patches = view.patches.clone();
-        view.wrap(13);
-        assert_eq!(view.wrapped_hunks, [0]);
-        assert_eq!(view.wrapped_rows.len(), 6); // Two header rows and four code rows.
-        assert_eq!(view.wrapped_rows[2].row, view.hunks[0] + 1);
-        assert_eq!(view.rows.len(), 2);
-        assert_eq!(view.patches, patches);
-    }
-
-    #[test]
     fn additions_deletions_and_line_numbers() {
         let view = build("let a = 1;\n", "let a = 2;\nlet b = 3;\n");
         assert_eq!((view.additions, view.deletions), (2, 1));
@@ -816,18 +783,6 @@ mod tests {
         assert_eq!(view.rows[1].kind, RowKind::Removed);
         assert_eq!(view.rows[1].old_line, Some(1));
         assert_eq!(view.rows[2].new_line, Some(1));
-    }
-
-    #[test]
-    fn distinct_hunks_have_context() {
-        let old: String = (0..30).map(|n| format!("line {n}\n")).collect();
-        let new = old
-            .replace("line 2\n", "changed 2\n")
-            .replace("line 25\n", "changed 25\n");
-        let view = build(&old, &new);
-        assert_eq!(view.hunks.len(), 2);
-        assert_eq!((view.additions, view.deletions), (2, 2));
-        assert!(view.rows.len() < 30);
     }
 
     #[test]

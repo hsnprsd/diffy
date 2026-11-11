@@ -180,6 +180,7 @@ mod tests {
     use super::*;
     use crate::{
         app::Focus,
+        diff::DiffMode,
         git::tests::{git, linked_repo, repo, text},
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -215,7 +216,8 @@ mod tests {
         let mut app = App::new(repo.clone()).unwrap();
         app.focus = Focus::Diff;
         app.keymap = keymap::Keymap::Vim;
-        app.resize_diff(42, 8);
+        app.set_diff_mode(DiffMode::SideBySide);
+        app.resize_diff(100, 8);
         app.scroll = 5;
         key(&mut app, KeyCode::Char('w'));
         key(&mut app, KeyCode::Char('j'));
@@ -226,10 +228,12 @@ mod tests {
         assert_eq!(app.repo.git_dir, linked_repo.git_dir);
         assert_eq!(app.branch, "linked");
         assert_eq!(app.keymap, keymap::Keymap::Vim);
+        assert_eq!(app.diff_mode, DiffMode::SideBySide);
+        assert!(!app.view.split_rows.is_empty());
         assert!(app.focus == Focus::Diff);
         assert_eq!(
             (app.viewport_width, app.viewport_height, app.scroll),
-            (42, 8, 0)
+            (100, 8, 0)
         );
         assert_eq!(
             app.files
@@ -296,6 +300,7 @@ mod tests {
         );
 
         key(&mut app, KeyCode::Esc); // Close the completed operation's output.
+        app.set_diff_mode(DiffMode::Unified);
         key(&mut app, KeyCode::Char('w'));
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Enter);
@@ -303,6 +308,8 @@ mod tests {
         switch_worktree(&path, &mut app, &mut watcher).unwrap();
         assert_eq!(app.repo.root, repo.root);
         assert_eq!(app.branch, "main");
+        assert_eq!(app.diff_mode, DiffMode::Unified);
+        assert!(app.view.split_rows.is_empty());
         assert_eq!(
             app.view.source,
             Some((String::new(), "main changes\n".into()))
@@ -315,26 +322,6 @@ mod tests {
             app.view.source,
             Some((String::new(), "main live changes\n".into()))
         );
-    }
-
-    #[test]
-    fn switching_worktrees_preserves_the_diff_mode_at_the_same_viewport_width() {
-        use crate::diff::DiffMode;
-
-        let (_dir, _linked, repo, linked_repo) = linked_repo();
-        let mut watcher = Watcher::new(&repo).unwrap();
-        let mut app = App::new(repo.clone()).unwrap();
-        for (mode, path) in [
-            (DiffMode::SideBySide, &linked_repo.root),
-            (DiffMode::Unified, &repo.root),
-        ] {
-            app.set_diff_mode(mode);
-            switch_worktree(path, &mut app, &mut watcher).unwrap();
-            assert_eq!(app.diff_mode, mode);
-            assert_eq!(app.viewport_width, 80);
-            assert_eq!(app.view.split_rows.is_empty(), mode == DiffMode::Unified);
-            assert_eq!(app.scroll, 0);
-        }
     }
 
     #[test]

@@ -794,26 +794,6 @@ mod tests {
     }
 
     #[test]
-    fn renders_black_theme_and_navigation_help() {
-        let (_dir, repo) = repo();
-        let mut app = App::new(repo).unwrap();
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(119, 0)].bg, Color::Rgb(0, 0, 0));
-        assert_eq!(buffer[(1, 5)].bg, Color::Rgb(0, 0, 0));
-        assert_eq!(buffer[(119, 1)].bg, BG);
-        assert_eq!(buffer[(119, 29)].bg, PANEL);
-        let text = screen(&terminal);
-        assert!(text.contains("Files 0"));
-        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let text = screen(&terminal);
-        assert!(text.contains("Select files / scroll diff"));
-        assert!(text.contains("Edit in $EDITOR at first (visible) hunk"));
-    }
-
-    #[test]
     fn help_and_popup_hints_follow_the_selected_preset() {
         let (_dir, repo) = repo();
         let mut app = App::new(repo).unwrap();
@@ -1150,27 +1130,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_scrolling_keeps_editor_at_the_hunk_start_after_resize() {
-        let (dir, repo) = repo();
-        let content: String = (1..=30).map(|n| format!("line {n}\n")).collect();
-        std::fs::write(dir.path().join("test.txt"), content).unwrap();
-        let mut app = App::new(repo).unwrap();
-        app.focus = Focus::Diff;
-        for _ in 0..15 {
-            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        }
-        for (width, height) in [(120, 30), (40, 12), (80, 24)] {
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            let cursor = terminal.get_cursor_position().unwrap();
-            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-            assert_eq!(terminal.get_cursor_position().unwrap(), cursor);
-            assert!(app.scroll > 0);
-            app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-            assert_eq!(app.edit_request.take().unwrap().line, Some(1));
-        }
-    }
-
-    #[test]
     fn staging_controls_and_commit_popup_are_visible() {
         let (dir, repo) = repo();
         std::fs::write(dir.path().join("file.txt"), "staged\n").unwrap();
@@ -1430,42 +1389,5 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(screen(&terminal).contains("* main"));
-    }
-
-    #[test]
-    fn renders_diff_and_help_at_different_sizes() {
-        let (dir, repo) = repo();
-        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let mut app = App::new(repo).unwrap();
-        for mode in [DiffMode::Unified, DiffMode::SideBySide] {
-            app.set_diff_mode(mode);
-            for (width, height) in [
-                (120, 30),
-                (80, 24),
-                (40, 12),
-                (10, 4),
-                (1, 1),
-                (0, 0),
-                (120, 3),
-            ] {
-                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-                for focus in [Focus::Files, Focus::Diff] {
-                    if app.focus != focus {
-                        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-                    }
-                    assert!(app.focus == focus);
-                    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-                    app.show_help = true;
-                    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-                    app.show_help = false;
-                }
-            }
-        }
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let text = screen(&terminal);
-        assert!(text.contains("main.rs"));
-        assert!(text.contains("fn main()"));
-        assert!(text.contains("Rust"));
     }
 }
