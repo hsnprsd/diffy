@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::mpsc::TryRecvError};
+use std::{
+    path::PathBuf,
+    sync::mpsc::TryRecvError,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -136,6 +140,7 @@ pub struct App {
     pub worktree_popup: Option<WorktreePopup>,
     pub worktree_request: Option<PathBuf>,
     pub status: Option<Status>,
+    status_expires_at: Option<Instant>,
     pending: Option<OperationHandle>,
     pub operation_details: Option<OperationDetails>,
     pub show_operation_details: bool,
@@ -195,6 +200,7 @@ impl App {
             worktree_popup: None,
             worktree_request: None,
             status: None,
+            status_expires_at: None,
             pending: None,
             operation_details: None,
             show_operation_details: false,
@@ -323,6 +329,25 @@ impl App {
             .unwrap_or(0)
     }
 
+    fn set_status(&mut self, status: Status) {
+        self.status_expires_at =
+            matches!(status, Status::Success(_)).then(|| Instant::now() + Duration::from_secs(3));
+        self.status = Some(status);
+    }
+
+    /// Restore footer hints after routine success feedback, even without user input.
+    pub fn expire_status(&mut self, now: Instant) -> bool {
+        if self
+            .status_expires_at
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.status = None;
+            self.status_expires_at = None;
+            return true;
+        }
+        false
+    }
+
     pub fn operation_label(&self) -> Option<&'static str> {
         self.pending
             .as_ref()
@@ -374,14 +399,13 @@ impl App {
             );
             self.repo.toggle_hunk(entry, patch)?;
         }
-        self.status = Some(Status::Success(
-            if staged {
-                "Unstaged changes"
-            } else {
-                "Staged changes"
-            }
-            .into(),
-        ));
+        let action = if staged { "Unstaged" } else { "Staged" };
+        let target = if self.focus == Focus::Files {
+            "file"
+        } else {
+            "hunk"
+        };
+        self.set_status(Status::Success(format!("{action} {target}")));
         self.refresh();
         Ok(())
     }
@@ -514,6 +538,7 @@ impl App {
         self.show_operation_details = true;
         self.error = None;
         self.status = None;
+        self.status_expires_at = None;
         Ok(())
     }
 
@@ -561,7 +586,7 @@ impl App {
                             } else {
                                 details.success_message.clone()
                             };
-                            self.status = Some(Status::Success(message));
+                            self.set_status(Status::Success(message));
                         }
                         OperationResult::Cancelled => {
                             let message = "Git operation cancelled".to_owned();
@@ -570,7 +595,7 @@ impl App {
                             {
                                 popup.error = Some(message.clone());
                             }
-                            self.status = Some(Status::Cancelled(message));
+                            self.set_status(Status::Cancelled(message));
                             self.show_operation_details = true;
                         }
                         OperationResult::Failed(error) => {
@@ -583,7 +608,7 @@ impl App {
                             }
                             self.error = Some(message.clone());
                             // Filesystem refreshes must not hide failures or their output.
-                            self.status = Some(Status::Error(message));
+                            self.set_status(Status::Error(message));
                             self.show_operation_details = true;
                         }
                     }
@@ -2068,6 +2093,26 @@ mod tests {
     }
 
     #[test]
+    fn success_feedback_lasts_three_seconds_and_errors_and_cancellations_persist() {
+        let (_dir, repo) = repo();
+        let mut app = App::new(repo).unwrap();
+        app.set_status(Status::Success("Staged file".into()));
+        let deadline = app.status_expires_at.unwrap();
+        app.expire_status(deadline - Duration::from_millis(1));
+        assert_eq!(app.status.as_ref().unwrap().message(), "Staged file");
+        assert!(app.expire_status(deadline));
+        for status in [
+            Status::Error("Push rejected".into()),
+            Status::Cancelled("Git operation cancelled".into()),
+        ] {
+            let expected = status.message().to_owned();
+            app.set_status(status);
+            app.expire_status(Instant::now() + Duration::from_secs(60));
+            assert_eq!(app.status.as_ref().unwrap().message(), expected);
+        }
+    }
+
+    #[test]
     fn operation_polling_is_bounded_and_worker_disconnects_are_reported() {
         let (_dir, repo) = repo();
         let mut app = App::new(repo).unwrap();
@@ -2095,6 +2140,14 @@ mod tests {
         assert!(app.poll_operation());
         assert!(app.pending.is_none());
         assert_eq!(app.status.as_ref().unwrap().message(), "Pulled main");
+        assert!(app.expire_status(Instant::now() + Duration::from_secs(3)));
+        let details = app.operation_details.as_ref().unwrap();
+        assert_eq!(details.success_message, "Pulled main");
+        assert_eq!(details.result, Some(OperationResult::Success));
+        assert_eq!(
+            details.lines.iter().filter(|line| *line == "line").count(),
+            130
+        );
 
         let (sender, receiver) = std::sync::mpsc::channel();
         app.pending = Some(OperationHandle {

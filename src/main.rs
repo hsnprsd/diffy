@@ -14,7 +14,7 @@ use std::{
     env,
     io::{self, IsTerminal},
     path::Path,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -80,6 +80,7 @@ fn main() -> Result<()> {
     let mut dirty = true;
     loop {
         dirty |= app.poll_operation();
+        dirty |= app.expire_status(Instant::now());
         if watcher.poll().context("Filesystem watcher failed")? {
             app.refresh();
             dirty = true;

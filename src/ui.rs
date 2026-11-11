@@ -1512,6 +1512,44 @@ mod tests {
     }
 
     #[test]
+    fn staging_feedback_names_the_target_then_restores_footer_hints() {
+        for (focus, target, hints) in [
+            (Focus::Files, "file", "c commit · Tab diff · ? help"),
+            (Focus::Diff, "hunk", "[/] hunk · Tab files · ? help"),
+        ] {
+            let (dir, repo) = repo();
+            std::fs::write(dir.path().join("file.txt"), "new\n").unwrap();
+            let mut app = App::new(repo).unwrap();
+            app.focus = focus;
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            for (message, action) in [("Staged", "unstage"), ("Unstaged", "stage")] {
+                app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+                app.expire_status(std::time::Instant::now());
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                let footer = |terminal: &Terminal<TestBackend>| {
+                    let buffer = terminal.backend().buffer();
+                    (0..120)
+                        .map(|x| buffer[(x, 29)].symbol())
+                        .collect::<String>()
+                        .trim_end()
+                        .to_owned()
+                };
+                assert_eq!(footer(&terminal), format!(" {message} {target}"));
+                assert!(
+                    app.expire_status(
+                        std::time::Instant::now() + std::time::Duration::from_secs(3)
+                    )
+                );
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                assert_eq!(
+                    footer(&terminal),
+                    format!(" Space {action} {target} · {hints}")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn operation_results_are_visible_in_the_footer_and_details() {
         let (_dir, repo) = repo();
         let mut app = App::new(repo).unwrap();

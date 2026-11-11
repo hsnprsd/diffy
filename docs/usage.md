@@ -168,7 +168,11 @@ already removed; inspect the worktree before retrying.
 
 In **Changes**, press **`Space`** on an unstaged (`[ ]`) entry to stage changes,
 or on a staged (`[x]`) entry to unstage them. The selection stays on the same file
-when its staging state changes.
+when its staging state changes. Feedback names the action's target: `Staged file`,
+`Unstaged file`, `Staged hunk`, or `Unstaged hunk`. Success messages return to the
+footer hints after three seconds, even while idle. Errors and cancellations stay
+visible, and completed Git output remains in the existing output popup until you
+close it.
 
 - In the **Files pane**, `Space` acts on the entire selected file, including
   additions, deletions, binary files, and mode changes.
