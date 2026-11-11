@@ -53,7 +53,11 @@ fn config_is_loaded_from_xdg_or_home_before_starting_the_ui() {
             assert!(output.status.success());
         }
         for preset in ["standard", "vim"] {
-            std::fs::write(&path, format!("keymap = \"{preset}\"\n")).unwrap();
+            std::fs::write(
+                &path,
+                format!("keymap = \"{preset}\"\neditor = \"nvim -f\"\n"),
+            )
+            .unwrap();
             let output = command.output().unwrap();
             assert!(
                 String::from_utf8_lossy(&output.stderr).contains("Not inside a Git working tree")

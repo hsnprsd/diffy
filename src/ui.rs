@@ -727,7 +727,7 @@ fn help(frame: &mut Frame, area: Rect, keymap: Keymap) {
         Line::raw("Space               Stage/unstage file (Files) or hunk (Diff)"),
         Line::raw("c                   Commit changes (message popup)"),
         Line::raw("p / P               Pull (fast-forward only) / push branch"),
-        Line::raw("e                   Edit in $EDITOR at first (visible) hunk"),
+        Line::raw("e                   Open editor at first (visible) hunk"),
         Line::raw(format!(
             "w                   Choose a worktree ({} deletes it)",
             keymap.label(Action::DeleteWorktree)

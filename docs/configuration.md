@@ -6,7 +6,7 @@
 
 Diffy reads `$XDG_CONFIG_HOME/diffy/config.toml`, falling back to
 `~/.config/diffy/config.toml` when `XDG_CONFIG_HOME` is unset, empty, or relative.
-A missing config file or omitted `keymap` uses the standard preset.
+A missing config file uses the defaults: the standard keymap and `$EDITOR`.
 
 ## Keymap
 
@@ -28,16 +28,25 @@ See the [keyboard reference](usage.md#keyboard-shortcuts) for both presets.
 
 ## Editor
 
-Set `EDITOR` before launching diffy, for example:
+Set `editor` in the config file to choose an editor for diffy:
+
+```toml
+editor = "nvim"
+```
+
+For VS Code, use `editor = "code --wait"`. Restart diffy to apply your settings.
+
+The `editor` setting takes precedence over the `EDITOR` environment variable. When
+`editor` is omitted, diffy falls back to `EDITOR`, which you can set before launching:
 
 ```sh
 export EDITOR=nvim
 ```
 
-For VS Code, use `export EDITOR='code --wait'`.
-
 Arguments and quoted executable paths are supported; shell expansions and pipelines
-are not evaluated. An unset or invalid `EDITOR` shows an error without leaving diffy.
+are not evaluated. If neither setting is set, or the selected command is empty or
+invalid, diffy shows an error without leaving the interface. An invalid `editor`
+setting does not fall back to `EDITOR`.
 
 Vim/Neovim, nano, Emacs, and other `+LINE` editors are supported, along with Helix,
 VS Code/VSCodium, Sublime Text, and Zed. The latter GUI editors receive `--wait`

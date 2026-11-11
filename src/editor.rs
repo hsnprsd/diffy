@@ -13,8 +13,12 @@ pub struct EditRequest {
 }
 
 impl EditRequest {
-    pub fn command(&self, root: &Path) -> Result<Command> {
-        let editor = env::var("EDITOR").context("Set $EDITOR to the editor you want to use")?;
+    pub fn command(&self, root: &Path, configured_editor: Option<&str>) -> Result<Command> {
+        let editor = match configured_editor {
+            Some(editor) => editor.to_owned(),
+            None => env::var("EDITOR")
+                .context("Set editor in config or $EDITOR to the editor you want to use")?,
+        };
         let path = root.join(&self.path);
         if !path
             .metadata()
@@ -31,10 +35,10 @@ impl EditRequest {
 
 fn editor_command(editor: &str, path: &Path, line: Option<usize>) -> Result<Command> {
     // Parse quoted arguments without running a shell; filenames are always separate arguments.
-    let words = shlex::split(editor).context("Invalid quoting in $EDITOR")?;
-    let (program, args) = words.split_first().context("$EDITOR is empty")?;
+    let words = shlex::split(editor).context("Invalid quoting in editor command")?;
+    let (program, args) = words.split_first().context("Editor command is empty")?;
     if program.is_empty() {
-        bail!("$EDITOR is empty");
+        bail!("Editor command is empty");
     }
     let mut command = Command::new(program);
     command.args(args);
@@ -90,6 +94,86 @@ mod tests {
     }
 
     #[test]
+    fn configured_editor_takes_precedence_and_otherwise_uses_editor_environment() {
+        // Isolate environment changes in subprocesses so parallel tests stay safe.
+        const CHILD: &str = "DIFFY_TEST_EDITOR_CHILD";
+        if env::var_os(CHILD).is_none() {
+            for editor in [None, Some("nano -w"), Some(""), Some("nano '")] {
+                let mut child = Command::new(env::current_exe().unwrap());
+                child
+                    .args([
+                        "--exact",
+                        "editor::tests::configured_editor_takes_precedence_and_otherwise_uses_editor_environment",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1");
+                match editor {
+                    Some(editor) => child.env("EDITOR", editor),
+                    None => child.env_remove("EDITOR"),
+                };
+                let output = child.output().unwrap();
+                assert!(output.status.success(), "{editor:?}: {output:?}");
+            }
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a file.rs"), "contents\n").unwrap();
+        let request = EditRequest {
+            path: "a file.rs".into(),
+            line: Some(42),
+        };
+        let command = request.command(dir.path(), Some("nvim -f")).unwrap();
+        assert_eq!(command.get_program(), "nvim");
+        assert_eq!(command.get_current_dir(), Some(dir.path()));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                std::ffi::OsStr::new("-f"),
+                std::ffi::OsStr::new("+42"),
+                dir.path().join("a file.rs").as_os_str(),
+            ]
+        );
+
+        let fallback = request.command(dir.path(), None);
+        match env::var("EDITOR").ok().as_deref() {
+            Some("nano -w") => {
+                let command = fallback.unwrap();
+                assert_eq!(command.get_program(), "nano");
+                assert_eq!(
+                    command.get_args().collect::<Vec<_>>(),
+                    [
+                        std::ffi::OsStr::new("-w"),
+                        std::ffi::OsStr::new("+42"),
+                        dir.path().join("a file.rs").as_os_str(),
+                    ]
+                );
+            }
+            editor => {
+                let expected = match editor {
+                    None => "Set editor in config or $EDITOR to the editor you want to use",
+                    Some("") => "Editor command is empty",
+                    Some("nano '") => "Invalid quoting in editor command",
+                    _ => unreachable!(),
+                };
+                assert_eq!(fallback.unwrap_err().to_string(), expected);
+            }
+        }
+        for (editor, expected) in [
+            ("", "Editor command is empty"),
+            ("nvim '", "Invalid quoting in editor command"),
+        ] {
+            assert_eq!(
+                request
+                    .command(dir.path(), Some(editor))
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn terminal_editors_receive_the_line_and_a_single_path_argument() {
         for editor in ["vi", "vim", "nvim", "nano", "emacs"] {
             assert_eq!(args(editor, Some(42)), ["+42", "/repo/a file.rs"]);
@@ -131,8 +215,18 @@ mod tests {
 
     #[test]
     fn rejects_empty_or_invalid_editor_settings() {
-        for editor in ["", "  ", "''", "vim '"] {
-            assert!(editor_command(editor, Path::new("/repo/file"), None).is_err());
+        for (editor, expected) in [
+            ("", "Editor command is empty"),
+            ("  ", "Editor command is empty"),
+            ("''", "Editor command is empty"),
+            ("vim '", "Invalid quoting in editor command"),
+        ] {
+            assert_eq!(
+                editor_command(editor, Path::new("/repo/file"), None)
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
         }
     }
 

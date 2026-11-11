@@ -38,13 +38,14 @@ fn main() -> Result<()> {
                  Updates automatically when repository files or refs change.\n\
                  Standard keys: Tab focus · ↑/↓ move\n\
                        Space stage/unstage file or hunk · c commit · p pull · P push\n\
-                       w worktrees · e edit in $EDITOR · [/] hunks · ? help · q quit\n\
+                       w worktrees · e open editor · [/] hunks · ? help · q quit\n\
                        v toggle unified / side-by-side diff\n\n\
                  Git output opens automatically: ↑/↓ or PgUp/PgDn scroll · Esc cancel running / close completed.\n\
                  Commit popup: Ctrl+S commit · Enter newline · Esc cancel.\n\
                  Worktree picker: Enter switch · Delete delete · r refresh · Esc close.\n\
                  Config: $XDG_CONFIG_HOME/diffy/config.toml (default ~/.config/diffy/config.toml).\n\
                  Set keymap = \"vim\" for Vim-style keys; the default is \"standard\".\n\
+                 Set editor = \"nvim\" to override $EDITOR.\n\
                  Pull is fast-forward only. Staging/unstaging never changes working-tree files."
             );
             return Ok(());
@@ -95,7 +96,7 @@ fn main() -> Result<()> {
                         app.worktree_popup.as_mut().unwrap().error = Some(format!("{error:#}"));
                     }
                     if let Some(request) = app.edit_request.take() {
-                        edit_file(request, &mut app, &mut terminal)?;
+                        edit_file(request, config.editor.as_deref(), &mut app, &mut terminal)?;
                     }
                     dirty = true;
                 }
@@ -131,10 +132,11 @@ fn switch_worktree(path: &Path, app: &mut App, watcher: &mut Watcher) -> Result<
 
 fn edit_file(
     request: editor::EditRequest,
+    configured_editor: Option<&str>,
     app: &mut App,
     terminal: &mut ratatui::DefaultTerminal,
 ) -> Result<()> {
-    let mut command = match request.command(&app.repo.root) {
+    let mut command = match request.command(&app.repo.root, configured_editor) {
         Ok(command) => command,
         Err(error) => {
             app.error = Some(format!("Editor: {error:#}"));
@@ -145,10 +147,10 @@ fn edit_file(
     ratatui::try_restore().context("Could not suspend terminal")?;
     let result = command
         .status()
-        .context("Could not start $EDITOR")
+        .context("Could not start editor")
         .and_then(|status| {
             if !status.success() {
-                bail!("$EDITOR exited with {status}");
+                bail!("Editor exited with {status}");
             }
             Ok(())
         });

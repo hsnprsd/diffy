@@ -15,6 +15,7 @@ use crate::keymap::Keymap;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub keymap: Keymap,
+    pub editor: Option<String>,
 }
 
 impl Config {
@@ -77,9 +78,13 @@ mod tests {
     fn missing_or_empty_config_uses_standard_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        assert_eq!(Config::load_from(&path).unwrap().keymap, Keymap::Standard);
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.keymap, Keymap::Standard);
+        assert_eq!(config.editor, None);
         fs::write(&path, "# Defaults\n").unwrap();
-        assert_eq!(Config::load_from(&path).unwrap().keymap, Keymap::Standard);
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.keymap, Keymap::Standard);
+        assert_eq!(config.editor, None);
     }
 
     #[test]
@@ -93,6 +98,18 @@ mod tests {
     }
 
     #[test]
+    fn config_preserves_editor_commands_alongside_the_keymap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for editor in ["nvim", "code --wait", "'/opt/my editor/nvim' -f", ""] {
+            fs::write(&path, format!("keymap = \"vim\"\neditor = {editor:?}\n")).unwrap();
+            let config = Config::load_from(&path).unwrap();
+            assert_eq!(config.keymap, Keymap::Vim);
+            assert_eq!(config.editor.as_deref(), Some(editor));
+        }
+    }
+
+    #[test]
     fn malformed_unknown_and_unreadable_configs_report_the_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -100,6 +117,7 @@ mod tests {
             "keymap =",
             "keymap = \"emacs\"",
             "keymap = 1",
+            "editor = 1",
             "keymaps = \"vim\"",
         ] {
             fs::write(&path, contents).unwrap();

@@ -58,7 +58,7 @@ These shortcuts are shared by both presets:
 | `p` | Pull the current branch (fast-forward only) |
 | `P` | Push the current branch |
 | `Esc` | Close help or a popup; cancel a running Git operation |
-| `e` | Open in `$EDITOR` at the first visible hunk (Diff pane) or first file hunk (Files pane) |
+| `e` | Open in your editor at the first visible hunk (Diff pane) or first file hunk (Files pane) |
 | `[` | Previous hunk |
 | `]` | Next hunk |
 | `?` | Show help |
@@ -232,7 +232,8 @@ remain enabled.
 
 ## Open a file in your editor
 
-[Configure `EDITOR`](configuration.md#editor) before opening a file.
+[Configure your editor](configuration.md#editor) using the `editor` setting or the
+`EDITOR` environment variable before opening a file.
 
 Press **`e`** in the Files pane to open the selected file at its first hunk.
 In the Diff pane, **`e`** opens at the first visible hunk, including a partially
